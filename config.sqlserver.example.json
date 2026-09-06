@@ -1,0 +1,18 @@
+{
+  "source_type": "sqlserver",
+  "source_id": "sqlserver-client-01",
+  "dsn": "${SQLSERVER_DSN}",
+  "tables": [{"schema": "dbo", "name": "items"}],
+  "data_dir": "data-sqlserver",
+  "http_url": "http://127.0.0.1:8080/cdc",
+  "http_headers": {"Authorization": "Bearer ${CDC_TOKEN}"},
+  "metrics_addr": "127.0.0.1:9090",
+  "sqlserver": {
+    "allow_snapshot_locks": false,
+    "fence_table": {"schema": "dbo", "name": "go_sync_fence"},
+    "poll_interval": "1s",
+    "query_timeout": "5m",
+    "snapshot_timeout": "1h",
+    "fence_timeout": "2m"
+  }
+}

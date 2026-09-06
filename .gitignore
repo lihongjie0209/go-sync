@@ -1,0 +1,5 @@
+/bin/
+/dist/
+/data/
+/config.json
+coverage.out

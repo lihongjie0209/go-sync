@@ -1,0 +1,48 @@
+version: 2
+
+project_name: go-sync
+
+builds:
+  - id: go-sync
+    main: ./cmd/go-sync
+    binary: go-sync
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - "386"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: windows
+    ids:
+      - go-sync
+    formats:
+      - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "386" }}x86{{ else }}x64{{ end }}
+    files:
+      - README.md
+      - config.example.json
+      - config.sqlserver.example.json
+      - docs/**
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  prerelease: auto

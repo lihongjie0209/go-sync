@@ -1,0 +1,65 @@
+groups:
+  - name: go-sync
+    rules:
+      - alert: GoSyncDown
+        expr: up{job="go-sync"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "go-sync metrics endpoint is unreachable"
+      - alert: GoSyncQueueNearCapacity
+        expr: go_sync_queue_bytes / go_sync_queue_limit_bytes > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "go-sync queue exceeds 80% of configured capacity"
+      - alert: GoSyncDiskLow
+        expr: go_sync_disk_free_bytes < (go_sync_disk_reserve_bytes + 268435456)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "go-sync disk is near its free-space reserve"
+      - alert: GoSyncDeliveryStalled
+        expr: (go_sync_queue_pending_messages > 0) and (increase(go_sync_delivery_messages_total[5m]) == 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "go-sync has published backlog but is not acknowledging delivery"
+      - alert: GoSyncCaptureDisconnected
+        expr: (go_sync_capture_streaming == 0) and on(job, instance) (go_sync_capture_phase{phase="stream"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "go-sync incremental capture is disconnected"
+      - alert: GoSyncWALSampleStale
+        expr: (time() - go_sync_wal_sample_timestamp_seconds > 120) and on(job, instance) (go_sync_capture_phase{phase="stream"} == 1) and on(job, instance) (go_sync_source_info{engine="postgres"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "go-sync WAL sample is stale or has never succeeded"
+      - alert: GoSyncSQLServerPollStale
+        expr: (time() - go_sync_capture_last_receive_timestamp_seconds > 120) and on(job, instance) (go_sync_capture_phase{phase="stream"} == 1) and on(job, instance) (go_sync_source_info{engine="sqlserver"} == 1) and on(job, instance) (go_sync_capture_backpressure == 0)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "go-sync SQL Server CDC polls are stale (check long transactions and connectivity)"
+      - alert: GoSyncSQLServerSnapshotWait
+        expr: (go_sync_sqlserver_snapshot_wait_start_timestamp_seconds > 0) and (time() - go_sync_sqlserver_snapshot_wait_start_timestamp_seconds > 60)
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "go-sync SQL Server snapshot is waiting for locks or the CDC fence"
+      - alert: GoSyncSQLServerRetentionGap
+        expr: increase(go_sync_sqlserver_cdc_retention_gaps_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "go-sync detected a CDC retention gap; capture cannot safely continue"

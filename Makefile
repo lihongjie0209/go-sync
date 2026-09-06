@@ -1,0 +1,9 @@
+.PHONY: build test integration vet
+build:
+	go build -trimpath -o bin/go-sync ./cmd/go-sync
+test:
+	go test -race ./...
+integration:
+	go test -race -count=1 -timeout=30m -tags=integration ./...
+vet:
+	go vet ./...
