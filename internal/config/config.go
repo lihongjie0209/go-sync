@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -22,15 +23,27 @@ type Table struct {
 	Name   string `json:"name"`
 }
 
+// FileColumn turns a path stored in one selected column into an embedded file.
+type FileColumn struct {
+	Schema   string `json:"schema"`
+	Table    string `json:"table"`
+	Column   string `json:"column"`
+	RootDir  string `json:"root_dir"`
+	MaxBytes int64  `json:"max_bytes"`
+}
+
 func (t Table) String() string { return t.Schema + "." + t.Name }
 
 type Config struct {
 	SourceType          string            `json:"source_type,omitempty"`
 	SQLServer           SQLServer         `json:"sqlserver,omitempty"`
+	SQLServerLegacy     SQLServerLegacy   `json:"sqlserver_legacy,omitempty"`
+	MySQL               MySQL             `json:"mysql,omitempty"`
 	SourceID            string            `json:"source_id"`
 	DSN                 string            `json:"dsn"`
 	Slot                string            `json:"slot"`
 	Tables              []Table           `json:"tables"`
+	FileColumns         []FileColumn      `json:"file_columns,omitempty"`
 	DataDir             string            `json:"data_dir"`
 	URL                 string            `json:"http_url"`
 	Headers             map[string]string `json:"http_headers"`
@@ -49,8 +62,10 @@ type Config struct {
 
 func Defaults() Config {
 	return Config{DataDir: "data", Wal2JSONAutoInstall: true, QueueBytes: 10 << 30, ReserveBytes: 256 << 20,
-		SQLServer: SQLServer{PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h", FenceTimeout: "2m"},
-		BatchRows: 500, BatchBytes: 1 << 20, MaxRowBytes: 16 << 20,
+		SQLServer:       SQLServer{PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h", FenceTimeout: "2m"},
+		SQLServerLegacy: SQLServerLegacy{AutoInstall: true, Owner: "dbo", Prefix: "go_sync_legacy", PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h"},
+		MySQL:           MySQL{ServerID: 100001, ConnectTimeout: "30s", SnapshotTimeout: "1h"},
+		BatchRows:       500, BatchBytes: 1 << 20, MaxRowBytes: 16 << 20,
 		HTTPTimeout: "30s", RetryMin: "1s", RetryMax: "60s"}
 }
 
@@ -78,11 +93,21 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Engine() != "postgres" && c.Engine() != "sqlserver" {
-		return errors.New("source_type must be postgres or sqlserver")
+	if c.Engine() != "postgres" && c.Engine() != "sqlserver" && c.Engine() != "sqlserver_legacy" && c.Engine() != "mysql" {
+		return errors.New("source_type must be postgres, sqlserver, sqlserver_legacy or mysql")
 	}
 	if c.Engine() == "sqlserver" {
 		if err := c.SQLServer.validate(c.Tables); err != nil {
+			return err
+		}
+	}
+	if c.Engine() == "sqlserver_legacy" {
+		if err := c.SQLServerLegacy.validate(c.Tables); err != nil {
+			return err
+		}
+	}
+	if c.Engine() == "mysql" {
+		if err := c.MySQL.validate(c.Tables); err != nil {
 			return err
 		}
 	}
@@ -122,6 +147,26 @@ func (c Config) Validate() error {
 	if c.BatchRows < 1 || c.BatchBytes < 1024 || c.MaxRowBytes < c.BatchBytes || c.QueueBytes < int64(c.MaxRowBytes)*2 {
 		return errors.New("invalid batch or queue limits")
 	}
+	fileRules := map[[3]string]bool{}
+	for _, rule := range c.FileColumns {
+		key := [3]string{rule.Schema, rule.Table, rule.Column}
+		if rule.Schema == "" || rule.Table == "" || rule.Column == "" || rule.RootDir == "" || strings.ContainsRune(rule.Schema+rule.Table+rule.Column+rule.RootDir, 0) {
+			return errors.New("file_columns require schema, table, column and root_dir without nul")
+		}
+		if !filepath.IsAbs(rule.RootDir) {
+			return errors.New("file_columns root_dir must be an absolute path")
+		}
+		if rule.MaxBytes < 1 || rule.MaxBytes > int64(c.MaxRowBytes) {
+			return errors.New("file_columns max_bytes must be positive and no larger than max_row_bytes")
+		}
+		if !seen[Table{Schema: rule.Schema, Name: rule.Table}] {
+			return errors.New("file_columns must reference a selected table")
+		}
+		if fileRules[key] {
+			return errors.New("file_columns must be unique")
+		}
+		fileRules[key] = true
+	}
 	for _, v := range []string{c.HTTPTimeout, c.RetryMin, c.RetryMax} {
 		d, e := time.ParseDuration(v)
 		if e != nil || d <= 0 {
@@ -150,12 +195,33 @@ func (c Config) Fingerprint() string {
 		Tables       []Table
 	}{c.SourceID, c.Slot, tables})
 	// Keep the historical PostgreSQL fingerprint byte-for-byte compatible.
-	if c.Engine() == "sqlserver" {
+	if c.Engine() == "sqlserver" || c.Engine() == "sqlserver_legacy" || c.Engine() == "mysql" {
 		b, _ = json.Marshal(struct {
 			Engine string
 			Source string
 			Tables []Table
-		}{Engine: "sqlserver", Source: c.SourceID, Tables: tables})
+		}{Engine: c.Engine(), Source: c.SourceID, Tables: tables})
+	}
+	if c.Engine() == "mysql" {
+		b, _ = json.Marshal(struct {
+			Engine   string
+			Source   string
+			ServerID uint32
+			Tables   []Table
+		}{Engine: c.Engine(), Source: c.SourceID, ServerID: c.MySQL.ServerID, Tables: tables})
+	}
+	if len(c.FileColumns) != 0 {
+		fileColumns := slices.Clone(c.FileColumns)
+		slices.SortFunc(fileColumns, func(a, b FileColumn) int {
+			return strings.Compare(a.Schema+"\x00"+a.Table+"\x00"+a.Column, b.Schema+"\x00"+b.Table+"\x00"+b.Column)
+		})
+		b, _ = json.Marshal(struct {
+			Engine      string
+			Source      string
+			Slot        string
+			Tables      []Table
+			FileColumns []FileColumn
+		}{c.Engine(), c.SourceID, c.Slot, tables, fileColumns})
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])

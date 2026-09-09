@@ -1,4 +1,4 @@
-package sqlserver
+package sqlserverlegacy
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 	"go-sync/internal/telemetry"
 )
 
-// batch stages bounded chunks, never publishing to make room for more rows.
-// The queue and publication rules are identical to the PostgreSQL collector.
 type batch struct {
 	cfg     config.Config
 	q       *queue.Store
@@ -35,12 +33,12 @@ func (b *batch) append(ctx context.Context, message event.Message) error {
 			return err
 		}
 		b.metrics.QueueFull()
-		st, err := b.q.State()
-		if err != nil {
-			return err
+		state, stateErr := b.q.State()
+		if stateErr != nil {
+			return stateErr
 		}
-		if st.ReadySeq == st.DeliveredSeq {
-			return errors.New("insufficient queue/disk capacity for a complete snapshot or transaction; increase capacity")
+		if state.ReadySeq == state.DeliveredSeq {
+			return errors.New("insufficient queue/disk capacity for a complete legacy snapshot or event")
 		}
 		b.metrics.Backpressure(true)
 		if err := delivery.Wait(ctx, 250*time.Millisecond); err != nil {

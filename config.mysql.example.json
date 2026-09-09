@@ -1,0 +1,24 @@
+{
+  "source_type": "mysql",
+  "source_id": "mysql-sales-01",
+  "dsn": "mysql://go_sync:${MYSQL_PASSWORD}@127.0.0.1:3306/sales",
+  "mysql": {
+    "server_id": 177001,
+    "allow_snapshot_lock": true,
+    "connect_timeout": "30s",
+    "snapshot_timeout": "1h"
+  },
+  "tables": [{ "schema": "sales", "name": "orders" }],
+  "data_dir": "data-mysql",
+  "http_url": "https://receiver.example/v1/change-batches",
+  "http_headers": { "Authorization": "Bearer ${SYNC_TOKEN}" },
+  "metrics_addr": "127.0.0.1:9187",
+  "queue_bytes": 10737418240,
+  "reserve_bytes": 268435456,
+  "batch_rows": 500,
+  "batch_bytes": 1048576,
+  "max_row_bytes": 16777216,
+  "http_timeout": "30s",
+  "retry_min": "1s",
+  "retry_max": "60s"
+}

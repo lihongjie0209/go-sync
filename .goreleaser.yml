@@ -30,6 +30,8 @@ archives:
       - README.md
       - config.example.json
       - config.sqlserver.example.json
+      - config.sqlserver-legacy.example.json
+      - config.mysql.example.json
       - docs/**
 
 checksum:

@@ -1,9 +1,11 @@
 package telemetry
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSQLServerProgressIsNotPublication(t *testing.T) {
@@ -80,4 +82,37 @@ func TestSQLServerLabelsAreBounded(t *testing.T) {
 	disabled.SQLSnapshotWait("fence")(true)
 	disabled.CDCPollOutcome(true, false, false)
 	disabled.RecoveryDiscarded(1)
+}
+
+func TestSQLServerLegacyMetrics(t *testing.T) {
+	t.Parallel()
+	m, q, cfg := metricsFixture(t)
+	cfg.SourceType = "sqlserver_legacy"
+	m = New(q, cfg)
+	m.LegacyPoll(time.Second, true, nil, false)
+	m.LegacyPoll(time.Second, false, errors.New("failed"), false)
+	m.LegacyOutboxDelete(true)
+	m.LegacyOutboxDelete(false)
+	body := scrape(t, m)
+	for _, sample := range []string{
+		`go_sync_source_info{engine="sqlserver_legacy"} 1`,
+		`go_sync_sqlserver_legacy_polls_total{result="progress"} 1`,
+		`go_sync_sqlserver_legacy_polls_total{result="error"} 1`,
+		"go_sync_sqlserver_legacy_outbox_events_deleted_total 1",
+		"go_sync_sqlserver_legacy_outbox_delete_errors_total 1",
+	} {
+		requireSample(t, body, sample)
+	}
+}
+
+func TestSQLServerLegacyOutboxMetrics(t *testing.T) {
+	t.Parallel()
+	m, _, _ := metricsFixture(t)
+	m.LegacyOutboxDelete(true)
+	m.LegacyOutboxDelete(false)
+	body := scrape(t, m)
+	requireSample(t, body, "go_sync_sqlserver_legacy_outbox_events_deleted_total 1")
+	requireSample(t, body, "go_sync_sqlserver_legacy_outbox_delete_errors_total 1")
+	var disabled *Metrics
+	disabled.LegacyOutboxDelete(true)
 }

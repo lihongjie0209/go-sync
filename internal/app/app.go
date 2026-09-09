@@ -12,8 +12,10 @@ import (
 	"go-sync/internal/capture"
 	"go-sync/internal/config"
 	"go-sync/internal/delivery"
+	mysqlsource "go-sync/internal/mysql"
 	"go-sync/internal/queue"
 	"go-sync/internal/sqlserver"
+	"go-sync/internal/sqlserverlegacy"
 	"go-sync/internal/telemetry"
 	"golang.org/x/sync/errgroup"
 )
@@ -73,6 +75,10 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 	g.Go(func() error {
 		if c.Engine() == "sqlserver" {
 			return sqlserver.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+		} else if c.Engine() == "sqlserver_legacy" {
+			return sqlserverlegacy.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+		} else if c.Engine() == "mysql" {
+			return mysqlsource.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
 		}
 		return capture.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
 	})

@@ -6,9 +6,11 @@ import "encoding/json"
 // Column distinguishes an absent value (not in Columns) from SQL NULL.
 // Non-null values use the source's lossless text representation (see protocol).
 type Column struct {
-	Name  string  `json:"name"`
-	Type  string  `json:"type"`
-	Value *string `json:"value"`
+	Name        string  `json:"name"`
+	Type        string  `json:"type"`
+	Value       *string `json:"value"`
+	Encoding    string  `json:"encoding,omitempty"`
+	SourceValue *string `json:"source_value,omitempty"`
 }
 
 type Row struct {

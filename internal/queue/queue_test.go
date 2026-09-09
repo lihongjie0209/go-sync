@@ -103,6 +103,42 @@ func TestFinalizeSnapshotLSNRewritesOnlyInvisibleMessages(t *testing.T) {
 	}
 }
 
+func TestSourceCleanupCheckpoint(t *testing.T) {
+	t.Parallel()
+	q, err := Open(t.TempDir(), 1<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := q.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := q.Initialize(State{SourceID: "legacy", Generation: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Append(event.Message{Kind: "transaction_end"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.PublishSource("legacy:00000000000000000001", false, "statement-token"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := q.State()
+	if err != nil || state.SourceCleanup != "statement-token" || state.ReadySeq != 1 {
+		t.Fatalf("unexpected state: %+v, %v", state, err)
+	}
+	if err := q.ClearSourceCleanup("wrong-token"); err == nil {
+		t.Fatal("mismatched cleanup token accepted")
+	}
+	if err := q.ClearSourceCleanup("statement-token"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = q.State()
+	if err != nil || state.SourceCleanup != "" || state.DurableLSN == "" {
+		t.Fatalf("cleanup changed checkpoint: %+v, %v", state, err)
+	}
+}
+
 func TestCapacityRollback(t *testing.T) {
 	q := openTest(t)
 	q.maxBytes = 1

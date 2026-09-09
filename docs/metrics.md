@@ -62,6 +62,9 @@
 | `sqlserver_retention_margin_seconds` | Gauge | durable 位点距各表当前低水位中最严格边界的时间距离；不是预计清理倒计时 |
 | `sqlserver_health_sample_timestamp_seconds{signal}` | Gauge | 各健康值最近有效采样的本地时间；0 表示当前未知，必须与值一起判断 |
 | `sqlserver_health_errors_total` | Counter | 健康采样失败次数；采集继续运行 |
+| `sqlserver_legacy_outbox_events_deleted_total` | Counter | SQL Server 2000 Outbox 事件在本地发布成功后从源端删除的数量 |
+| `sqlserver_legacy_outbox_delete_errors_total` | Counter | 本地发布后源端精确删除失败的次数；恢复时可能产生至少一次重复 |
+| `sqlserver_legacy_polls_total{result}` / `sqlserver_legacy_poll_duration_seconds` | Counter / Histogram | SQL Server 2000 Outbox 轮询结果与耗时 |
 | `capture_recovery_discarded_messages_total` | Counter | 故障恢复成功清理的、从未发布的暂存消息数 |
 | `metrics_requests_total{code}` / `metrics_request_duration_seconds` | Counter / Histogram | 监控接口自身的返回码/耗时；当前请求结束后才计入 |
 

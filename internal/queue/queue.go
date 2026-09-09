@@ -34,6 +34,7 @@ type State struct {
 	Phase           string `json:"phase"`
 	SnapshotLSN     string `json:"snapshot_lsn"`
 	DurableLSN      string `json:"durable_lsn"`
+	SourceCleanup   string `json:"source_cleanup,omitempty"`
 	NextSeq         uint64 `json:"next_seq"`
 	ReadySeq        uint64 `json:"ready_seq"`
 	DeliveredSeq    uint64 `json:"delivered_seq"`
@@ -242,6 +243,28 @@ func (s *Store) Append(m event.Message) error {
 
 // Publish atomically exposes every staged chunk and advances the replay checkpoint.
 func (s *Store) Publish(lsn string, sealSnapshot bool) error {
+	return s.PublishSource(lsn, sealSnapshot, "")
+}
+
+// PublishSchema exposes a complete schema refresh and advances its binlog
+// checkpoint and schema hash in the same local transaction.
+func (s *Store) PublishSchema(lsn, schemaHash string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		st, err := read(tx)
+		if err != nil {
+			return err
+		}
+		if st.Phase != "stream" {
+			return errors.New("schema can only be published while streaming")
+		}
+		st.ReadySeq, st.DurableLSN, st.SchemaHash = st.NextSeq, lsn, schemaHash
+		return save(tx, st)
+	})
+}
+
+// PublishSource also records source-side cleanup that must happen only after
+// this local publication is durable. It is used by trigger-backed outboxes.
+func (s *Store) PublishSource(lsn string, sealSnapshot bool, cleanup string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		st, e := read(tx)
 		if e != nil {
@@ -255,6 +278,23 @@ func (s *Store) Publish(lsn string, sealSnapshot bool) error {
 		}
 		st.ReadySeq = st.NextSeq
 		st.DurableLSN = lsn
+		st.SourceCleanup = cleanup
+		return save(tx, st)
+	})
+}
+
+// ClearSourceCleanup acknowledges an idempotent source cleanup without
+// changing message visibility or the capture checkpoint.
+func (s *Store) ClearSourceCleanup(expected string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		st, err := read(tx)
+		if err != nil {
+			return err
+		}
+		if st.SourceCleanup != expected {
+			return errors.New("source cleanup token changed")
+		}
+		st.SourceCleanup = ""
 		return save(tx, st)
 	})
 }

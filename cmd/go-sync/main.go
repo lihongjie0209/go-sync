@@ -17,7 +17,9 @@ import (
 	"go-sync/internal/app"
 	"go-sync/internal/capture"
 	"go-sync/internal/config"
+	mysqlsource "go-sync/internal/mysql"
 	"go-sync/internal/sqlserver"
+	"go-sync/internal/sqlserverlegacy"
 )
 
 var version = "dev"
@@ -66,6 +68,10 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 		var info any
 		if c.Engine() == "sqlserver" {
 			info, err = sqlserver.Inspect(checkCtx, c)
+		} else if c.Engine() == "sqlserver_legacy" {
+			info, err = sqlserverlegacy.Inspect(checkCtx, c)
+		} else if c.Engine() == "mysql" {
+			info, err = mysqlsource.Inspect(checkCtx, c)
 		} else {
 			info, err = capture.Inspect(checkCtx, c)
 		}

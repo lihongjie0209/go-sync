@@ -39,6 +39,9 @@ type Metrics struct {
 	sqlHealth                                                         map[string]prometheus.Gauge
 	sqlHealthSampled                                                  *prometheus.GaugeVec
 	sqlHealthErrors                                                   prometheus.Counter
+	legacyDeleted, legacyDeleteErrors                                 prometheus.Counter
+	legacyPollDuration                                                prometheus.Histogram
+	legacyPolls                                                       *prometheus.CounterVec
 }
 
 func New(q *queue.Store, c config.Config) *Metrics {
@@ -102,6 +105,14 @@ func New(q *queue.Store, c config.Config) *Metrics {
 	m.cdcPollDuration = histogram("sqlserver_cdc_poll_duration_seconds", "SQL Server CDC poll duration including local staging.", prometheus.DefBuckets)
 	// Alert: increase(go_sync_sqlserver_cdc_retention_gaps_total[5m]) > 0
 	m.cdcRetentionGaps = counter("sqlserver_cdc_retention_gaps_total", "Detected SQL Server CDC retention gaps; capture stops without skipping data.")
+	m.legacyDeleted = counter("sqlserver_legacy_outbox_events_deleted_total", "Legacy source outbox events deleted after local durable publication.")
+	m.legacyDeleteErrors = counter("sqlserver_legacy_outbox_delete_errors_total", "Legacy source outbox deletion failures after local publication; retries can duplicate events.")
+	m.legacyPollDuration = histogram("sqlserver_legacy_poll_duration_seconds", "SQL Server legacy outbox poll duration including local staging.", prometheus.DefBuckets)
+	m.legacyPolls = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "go_sync", Name: "sqlserver_legacy_polls_total", Help: "Legacy outbox polls by bounded result."}, []string{"result"})
+	reg.MustRegister(m.legacyPolls)
+	for _, result := range []string{"progress", "idle", "error", "canceled"} {
+		m.legacyPolls.WithLabelValues(result)
+	}
 	// Dashboard: go_sync_sqlserver_snapshot_scanned_rows
 	m.sqlSnapshotActive = gauge("sqlserver_snapshot_active", "One during a SQL Server snapshot attempt, including waits.")
 	m.sqlSnapshotScanned = gauge("sqlserver_snapshot_scanned_rows", "Rows accepted into the current or last snapshot batch; not necessarily durable or published. Resets per attempt.")
@@ -140,6 +151,36 @@ func New(q *queue.Store, c config.Config) *Metrics {
 	m.handler = promhttp.InstrumentHandlerCounter(scrapes, promhttp.InstrumentHandlerDuration(scrapeDuration,
 		promhttp.HandlerFor(reg, promhttp.HandlerOpts{MaxRequestsInFlight: 4, EnableOpenMetrics: true})))
 	return m
+}
+
+func (m *Metrics) LegacyOutboxDelete(success bool) {
+	if m == nil {
+		return
+	}
+	if success {
+		m.legacyDeleted.Inc()
+	} else {
+		m.legacyDeleteErrors.Inc()
+	}
+}
+
+func (m *Metrics) LegacyPoll(elapsed time.Duration, progress bool, err error, canceled bool) {
+	if m == nil {
+		return
+	}
+	m.legacyPollDuration.Observe(elapsed.Seconds())
+	result := "idle"
+	if canceled {
+		result = "canceled"
+	} else if err != nil {
+		result = "error"
+	} else if progress {
+		result = "progress"
+	}
+	m.legacyPolls.WithLabelValues(result).Inc()
+	if err == nil {
+		m.lastReceive.SetToCurrentTime()
+	}
 }
 
 func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) { m.handler.ServeHTTP(w, r) }

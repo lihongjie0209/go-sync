@@ -9,6 +9,7 @@ import (
 	"go-sync/internal/config"
 	"go-sync/internal/delivery"
 	"go-sync/internal/event"
+	"go-sync/internal/fileembed"
 	"go-sync/internal/queue"
 	"go-sync/internal/telemetry"
 )
@@ -57,6 +58,9 @@ func (b *batcher) append(ctx context.Context, m event.Message) error {
 }
 
 func (b *batcher) add(ctx context.Context, row event.Row) error {
+	if err := fileembed.Apply(b.cfg, &row); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(row)
 	if err != nil {
 		return err

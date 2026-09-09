@@ -1,4 +1,4 @@
-package sqlserver
+package mysql
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 	"go-sync/internal/telemetry"
 )
 
-// batch stages bounded chunks, never publishing to make room for more rows.
-// The queue and publication rules are identical to the PostgreSQL collector.
 type batch struct {
 	cfg     config.Config
 	q       *queue.Store
@@ -24,13 +22,13 @@ type batch struct {
 	size    int
 }
 
-func (b *batch) append(ctx context.Context, message event.Message) error {
+func (b *batch) append(ctx context.Context, m event.Message) error {
 	defer b.metrics.Backpressure(false)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := b.q.Append(message)
+		err := b.q.Append(m)
 		if !errors.Is(err, queue.ErrFull) {
 			return err
 		}
@@ -40,7 +38,7 @@ func (b *batch) append(ctx context.Context, message event.Message) error {
 			return err
 		}
 		if st.ReadySeq == st.DeliveredSeq {
-			return errors.New("insufficient queue/disk capacity for a complete snapshot or transaction; increase capacity")
+			return errors.New("insufficient queue/disk capacity for a complete mysql snapshot or transaction")
 		}
 		b.metrics.Backpressure(true)
 		if err := delivery.Wait(ctx, 250*time.Millisecond); err != nil {
@@ -72,7 +70,6 @@ func (b *batch) add(ctx context.Context, row event.Row) error {
 	}
 	return nil
 }
-
 func (b *batch) flush(ctx context.Context) error {
 	if len(b.message.Rows) == 0 {
 		return nil

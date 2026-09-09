@@ -32,6 +32,29 @@ func TestSourceFingerprintCompatibility(t *testing.T) {
 	}
 }
 
+func TestSQLServerLegacyConfiguration(t *testing.T) {
+	t.Parallel()
+	c := Defaults()
+	c.SourceType, c.SourceID, c.DSN = "sqlserver_legacy", "legacy", "sqlserver://localhost?database=test"
+	c.URL = "http://localhost/cdc"
+	c.Tables = []Table{{Schema: "dbo", Name: "items"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.SQLServerLegacy.AutoInstall {
+		t.Fatal("legacy auto install should default on")
+	}
+	legacyFingerprint := c.Fingerprint()
+	c.SourceType = "sqlserver"
+	c.SQLServer.FenceTable = Table{Schema: "dbo", Name: "fence"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Fingerprint() == legacyFingerprint {
+		t.Fatal("legacy and cdc sources share a fingerprint")
+	}
+}
+
 func TestSQLServerConfiguration(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

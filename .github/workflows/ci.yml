@@ -50,12 +50,12 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: Test PostgreSQL and SQL Server with Testcontainers
-        run: go test -race -count=1 -timeout=30m -tags=integration ./...
+      - name: Test PostgreSQL, SQL Server, MySQL 5.6 and MySQL 5.7 with Testcontainers
+        run: go test -race -count=1 -timeout=55m -tags=integration ./...
