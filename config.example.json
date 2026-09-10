@@ -4,6 +4,7 @@
   "slot": "go_sync_example",
   "tables": [{"schema":"public", "name":"items"}],
   "data_dir": "data",
+  "log": {"file":"logs/go-sync.log", "level":"info", "max_size_mb":100, "max_backups":10, "max_age_days":30, "compress":true},
   "metrics_addr": "127.0.0.1:9108",
   "wal2json_auto_install": true,
   "postgres_bin_dir": "",

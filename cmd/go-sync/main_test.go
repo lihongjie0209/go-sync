@@ -22,6 +22,9 @@ func TestCLIUsage(t *testing.T) {
 		{"unknown command", []string{"delete-slot"}, 2},
 		{"unknown flag", []string{"run", "--unknown"}, 2},
 		{"extra arguments", []string{"run", "extra"}, 2},
+		{"service action required", []string{"service"}, 2},
+		{"unknown service action", []string{"service", "restart"}, 2},
+		{"service extra arguments", []string{"service", "status", "extra"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer

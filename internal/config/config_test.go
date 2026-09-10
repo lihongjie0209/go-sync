@@ -22,6 +22,11 @@ func TestConfigurationValidation(t *testing.T) {
 		{"metrics named port", func(c *Config) { c.MetricsAddr = "localhost:http" }},
 		{"metrics ephemeral port", func(c *Config) { c.MetricsAddr = "localhost:0" }},
 		{"plugin path nul", func(c *Config) { c.PostgresBinDir = "invalid\x00path" }},
+		{"log path nul", func(c *Config) { c.Log.File = "invalid\x00path" }},
+		{"log level", func(c *Config) { c.Log.Level = "verbose" }},
+		{"log size", func(c *Config) { c.Log.MaxSizeMB = 0 }},
+		{"log backups", func(c *Config) { c.Log.MaxBackups = -1 }},
+		{"log age", func(c *Config) { c.Log.MaxAgeDays = -1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := Defaults()
@@ -38,6 +43,16 @@ func TestConfigurationValidation(t *testing.T) {
 				t.Fatal("invalid config accepted")
 			}
 		})
+	}
+}
+
+func TestLogSettingsDoNotChangeCaptureScope(t *testing.T) {
+	t.Parallel()
+	c := Defaults()
+	fingerprint := c.Fingerprint()
+	c.Log = Log{File: `D:\logs\go-sync.log`, Level: "debug", MaxSizeMB: 10, MaxBackups: 2, MaxAgeDays: 1}
+	if c.Fingerprint() != fingerprint {
+		t.Fatal("log settings changed capture scope")
 	}
 }
 

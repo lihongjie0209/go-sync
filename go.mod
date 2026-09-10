@@ -15,6 +15,7 @@ require (
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
@@ -88,5 +89,4 @@ require (
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )

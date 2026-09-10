@@ -10,6 +10,8 @@ MySQL 5.6/5.7 使用 ROW binlog，支持一致性全量、事务级增量和无�
 
 所有数据源都可按列把本机文件引用转换为 Base64，同时保留原始路径；配置与安全边界见 [文件引用嵌入](docs/file-columns.md)。
 
+Windows 发布包支持原生 Service 安装、卸载、启动、停止和状态查询，并支持 JSON 文件日志按大小滚动、数量/天数保留及 gzip 压缩，参见 [Windows Service 与滚动日志](docs/windows-service.md)。
+
 ## 发布包
 
 推送 `v*` 标签会由 GoReleaser 创建 GitHub Release，发布 Windows x64 与 x86 ZIP 和统一的 SHA-256 `checksums.txt`。每个 ZIP 包含可执行文件、PostgreSQL/SQL Server 配置示例及 `docs` 文档；版本号通过构建参数写入 `go-sync version`。

@@ -10,6 +10,7 @@
   },
   "tables": [{ "schema": "sales", "name": "orders" }],
   "data_dir": "data-mysql",
+  "log": {"file": "logs/go-sync-mysql.log", "level": "info", "max_size_mb": 100, "max_backups": 10, "max_age_days": 30, "compress": true},
   "http_url": "https://receiver.example/v1/change-batches",
   "http_headers": { "Authorization": "Bearer ${SYNC_TOKEN}" },
   "metrics_addr": "127.0.0.1:9187",

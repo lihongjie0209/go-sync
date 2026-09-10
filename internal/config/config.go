@@ -32,6 +32,16 @@ type FileColumn struct {
 	MaxBytes int64  `json:"max_bytes"`
 }
 
+// Log configures structured JSON logging and file rotation.
+type Log struct {
+	File       string `json:"file,omitempty"`
+	Level      string `json:"level,omitempty"`
+	MaxSizeMB  int    `json:"max_size_mb,omitempty"`
+	MaxBackups int    `json:"max_backups,omitempty"`
+	MaxAgeDays int    `json:"max_age_days,omitempty"`
+	Compress   bool   `json:"compress,omitempty"`
+}
+
 func (t Table) String() string { return t.Schema + "." + t.Name }
 
 type Config struct {
@@ -56,6 +66,7 @@ type Config struct {
 	RetryMin            string            `json:"retry_min"`
 	RetryMax            string            `json:"retry_max"`
 	MetricsAddr         string            `json:"metrics_addr"`
+	Log                 Log               `json:"log,omitempty"`
 	Wal2JSONAutoInstall bool              `json:"wal2json_auto_install"`
 	PostgresBinDir      string            `json:"postgres_bin_dir"`
 }
@@ -65,6 +76,7 @@ func Defaults() Config {
 		SQLServer:       SQLServer{PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h", FenceTimeout: "2m"},
 		SQLServerLegacy: SQLServerLegacy{AutoInstall: true, Owner: "dbo", Prefix: "go_sync_legacy", PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h"},
 		MySQL:           MySQL{ServerID: 100001, ConnectTimeout: "30s", SnapshotTimeout: "1h"},
+		Log:             Log{Level: "info", MaxSizeMB: 100, MaxBackups: 10, MaxAgeDays: 30, Compress: true},
 		BatchRows:       500, BatchBytes: 1 << 20, MaxRowBytes: 16 << 20,
 		HTTPTimeout: "30s", RetryMin: "1s", RetryMax: "60s"}
 }
@@ -113,6 +125,9 @@ func (c Config) Validate() error {
 	}
 	if strings.ContainsRune(c.PostgresBinDir, 0) {
 		return errors.New("postgres_bin_dir must not contain nul")
+	}
+	if err := c.Log.validate(); err != nil {
+		return err
 	}
 	if c.MetricsAddr != "" {
 		_, port, err := net.SplitHostPort(c.MetricsAddr)
@@ -182,6 +197,27 @@ func (c Config) Validate() error {
 		if strings.ContainsAny(k+v, "\r\n") || k == "" {
 			return errors.New("invalid http header")
 		}
+	}
+	return nil
+}
+
+func (l Log) validate() error {
+	if strings.ContainsRune(l.File, 0) {
+		return errors.New("log.file must not contain nul")
+	}
+	switch strings.ToLower(l.Level) {
+	case "debug", "info", "warn", "error":
+	default:
+		return errors.New("log.level must be debug, info, warn or error")
+	}
+	if l.MaxSizeMB < 1 || l.MaxSizeMB > 10240 {
+		return errors.New("log.max_size_mb must be between 1 and 10240")
+	}
+	if l.MaxBackups < 0 || l.MaxBackups > 10000 {
+		return errors.New("log.max_backups must be between 0 and 10000")
+	}
+	if l.MaxAgeDays < 0 || l.MaxAgeDays > 36500 {
+		return errors.New("log.max_age_days must be between 0 and 36500")
 	}
 	return nil
 }

@@ -4,6 +4,7 @@
   "dsn": "${SQLSERVER_DSN}",
   "tables": [{"schema": "dbo", "name": "items"}],
   "data_dir": "data-sqlserver",
+  "log": {"file": "logs/go-sync-sqlserver.log", "level": "info", "max_size_mb": 100, "max_backups": 10, "max_age_days": 30, "compress": true},
   "http_url": "http://127.0.0.1:8080/cdc",
   "http_headers": {"Authorization": "Bearer ${CDC_TOKEN}"},
   "metrics_addr": "127.0.0.1:9090",
