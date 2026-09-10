@@ -41,6 +41,7 @@ the Testcontainers integration suite on each change, and a five-minute
 stability/race test every night or on manual dispatch.
 
 Tag releases are published to GitHub first and then mirrored to `cf-file` under
-`release/<repository>/<tag>/`. The release workflow requires the repository
-secret `CF_FILE_PASSWORD`; a failed mirror job can be retried independently
-without rebuilding or republishing the GitHub Release.
+`release/<repository>/<tag>/` by `cf-file-upload-action`; only the newest seven
+published tag directories are retained. The release workflow requires the
+repository secret `CF_FILE_PASSWORD`; a failed mirror job can be retried
+independently without rebuilding or republishing the GitHub Release.
