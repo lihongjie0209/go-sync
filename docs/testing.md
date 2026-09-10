@@ -39,3 +39,8 @@ GO_SYNC_STABILITY_DURATION=30m make stability
 GitHub Actions runs unit/race and short benchmark smoke tests on each change,
 the Testcontainers integration suite on each change, and a five-minute
 stability/race test every night or on manual dispatch.
+
+Tag releases are published to GitHub first and then mirrored to `cf-file` under
+`release/<repository>/<tag>/`. The release workflow requires the repository
+secret `CF_FILE_PASSWORD`; a failed mirror job can be retried independently
+without rebuilding or republishing the GitHub Release.

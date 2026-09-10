@@ -36,3 +36,59 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  mirror-release:
+    name: Mirror release to cf-file
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CF_FILE_BASE_URL: https://file.lihongjie.cn
+      CF_FILE_PASSWORD: ${{ secrets.CF_FILE_PASSWORD }}
+    steps:
+      - name: Download GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets
+
+      - name: Upload assets to cf-file
+        run: |
+          set -euo pipefail
+
+          if [ -z "$CF_FILE_PASSWORD" ]; then
+            echo 'CF_FILE_PASSWORD repository secret is required' >&2
+            exit 1
+          fi
+
+          project_name=${GITHUB_REPOSITORY#*/}
+          remote_prefix="release/$project_name/$GITHUB_REF_NAME"
+          asset_count=0
+
+          while IFS= read -r -d '' asset; do
+            filename=${asset#release-assets/}
+            object_key=$(jq -rn \
+              --arg value "$remote_prefix/$filename" \
+              '$value | @uri')
+
+            curl --fail-with-body --silent --show-error --location \
+              --retry 5 --retry-all-errors \
+              --user ":$CF_FILE_PASSWORD" \
+              --header 'X-Overwrite: true' \
+              --upload-file "$asset" \
+              "$CF_FILE_BASE_URL/upload/$object_key"
+            asset_count=$((asset_count + 1))
+          done < <(find release-assets -type f -print0)
+
+          if [ "$asset_count" -eq 0 ]; then
+            echo "GitHub Release $GITHUB_REF_NAME has no assets" >&2
+            exit 1
+          fi
+
+          echo "Uploaded $asset_count assets to $remote_prefix/"
