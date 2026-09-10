@@ -30,9 +30,8 @@ jobs:
         run: go mod tidy && git diff --exit-code -- go.mod go.sum
       - name: Vet
         run: go vet ./...
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Verify generated protobuf
         run: |
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
