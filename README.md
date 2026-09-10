@@ -122,7 +122,7 @@ curl http://127.0.0.1:9108/metrics
 
 覆盖采集事务/行数、连接重试、WAL 保留与字节积压、队列已发布/暂存消息、磁盘余量、HTTP 耗时/重试/无效 ACK、确认投递量、schema 漂移及 Go/进程指标。Counter 在进程重启时归零，队列 Gauge 从磁盘恢复；成功 HTTP 请求和本地确认投递分别计数。
 
-完整指标口径、PromQL、抓取配置和告警示例见 [docs/metrics.md](docs/metrics.md)。Schema 自动适配仍是待实现项；监控功能不改变当前“发现结构漂移则停止”的行为。
+完整指标口径、PromQL、抓取配置和告警示例见 [docs/metrics.md](docs/metrics.md)。标准服务端支持 schema 版本屏障，并可选择自动增加安全的可空非主键字段。使用标准 gRPC 时，MySQL 5.6/5.7 和 PostgreSQL 能在线重推完整 schema 后继续增量；SQL Server CDC 和 SQL Server 2000 当前检测到源端 DDL 变化后仍会停止并要求重新初始化。
 
 ## 测试
 

@@ -376,18 +376,22 @@ func TestPostgresSnapshotStreamAndRecovery(t *testing.T) {
 		}
 		wait(func() bool { return r.rows["items/3"] != nil && *r.rows["items/3"]["body"] == "after postgres crash" })
 	}
-	// Schema drift must fail visibly instead of acknowledging changed-shape rows.
+	// HTTP has no schema_end barrier and therefore remains fail closed.
 	_, e = conn.Exec(ctx, "ALTER TABLE "+quoted+".items ADD COLUMN added text")
 	if e != nil {
 		t.Fatal(e)
 	}
+	_, e = conn.Exec(ctx, "INSERT INTO "+quoted+".items(id,body,added) VALUES(4,'after schema','online')")
+	if e != nil {
+		t.Fatal(e)
+	}
 	select {
-	case e := <-done:
-		if e == nil {
-			t.Error("schema drift did not fail")
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "standard gRPC server") {
+			t.Fatalf("unexpected HTTP schema drift result: %v", err)
 		}
-		done <- e
+		done <- err
 	case <-ctx.Done():
-		t.Fatal("schema drift not detected")
+		t.Fatal("HTTP schema drift was not rejected")
 	}
 }

@@ -18,6 +18,7 @@
   "syncers": [{
     "id": "pms-client-01",
     "token": "${PMS_SYNC_TOKEN}",
+    "auto_add_nullable_columns": false,
     "postgres": {"dsn": "${PMS_TARGET_DSN}", "target_schema": "pms", "metadata_schema": "go_sync_meta"},
     "tables": [{"source_schema": "public", "name": "documents"}],
     "file_columns": [{"source_schema": "public", "table": "documents", "source_column": "file_path", "content_column": "file_content"}]

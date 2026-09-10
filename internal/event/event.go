@@ -31,19 +31,20 @@ type TableRef struct {
 }
 
 type Message struct {
-	Version     string          `json:"version"`
-	SourceID    string          `json:"source_id"`
-	Generation  string          `json:"generation"`
-	Seq         uint64          `json:"seq"`
-	ID          string          `json:"message_id"`
-	Kind        string          `json:"kind"`
-	Transaction string          `json:"transaction,omitempty"`
-	Chunk       uint64          `json:"chunk,omitempty"`
-	LSN         string          `json:"lsn,omitempty"`
-	Tables      []TableRef      `json:"tables,omitempty"`
-	Schema      json.RawMessage `json:"schema,omitempty"`
-	Rows        []Row           `json:"rows,omitempty"`
-	CreatedAt   string          `json:"created_at"`
+	Version       string          `json:"version"`
+	SourceID      string          `json:"source_id"`
+	Generation    string          `json:"generation"`
+	SchemaVersion string          `json:"schema_version,omitempty"`
+	Seq           uint64          `json:"seq"`
+	ID            string          `json:"message_id"`
+	Kind          string          `json:"kind"`
+	Transaction   string          `json:"transaction,omitempty"`
+	Chunk         uint64          `json:"chunk,omitempty"`
+	LSN           string          `json:"lsn,omitempty"`
+	Tables        []TableRef      `json:"tables,omitempty"`
+	Schema        json.RawMessage `json:"schema,omitempty"`
+	Rows          []Row           `json:"rows,omitempty"`
+	CreatedAt     string          `json:"created_at"`
 }
 
 type Ack struct {

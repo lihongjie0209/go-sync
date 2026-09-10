@@ -69,6 +69,7 @@ func testMySQL(t *testing.T, version string) {
 	exec("INSERT INTO bag VALUES(1,'same'),(1,'same')")
 	cfg := config.Defaults()
 	cfg.SourceType = "mysql"
+	cfg.Transport = "grpc"
 	cfg.SourceID = "mysql-" + version
 	cfg.DSN = dsn
 	cfg.URL = "http://127.0.0.1/unused"
@@ -169,8 +170,8 @@ func testMySQL(t *testing.T, version string) {
 	deadline = time.Now().Add(30 * time.Second)
 	for {
 		state, _ := q.State()
-		// Full schema set, one row chunk and transaction_end.
-		if state.ReadySeq-state.DeliveredSeq >= uint64(len(cfg.Tables)+2) {
+		// Full schema set, schema_end, one row chunk and transaction_end.
+		if state.ReadySeq-state.DeliveredSeq >= uint64(len(cfg.Tables)+3) {
 			break
 		}
 		select {
@@ -184,10 +185,13 @@ func testMySQL(t *testing.T, version string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	afterDDL := drain(t, q)
-	schemaSeen, rowSeen := false, false
+	schemaSeen, schemaEndSeen, rowSeen := false, false, false
 	for _, message := range afterDDL {
 		if message.Kind == "schema" {
-			schemaSeen = true
+			schemaSeen = message.SchemaVersion != ""
+		}
+		if message.Kind == "schema_end" {
+			schemaEndSeen = message.SchemaVersion != ""
 		}
 		for _, row := range message.Rows {
 			if row.Table == "bag" && len(row.Columns) == 3 {
@@ -195,7 +199,7 @@ func testMySQL(t *testing.T, version string) {
 			}
 		}
 	}
-	if !schemaSeen || !rowSeen {
+	if !schemaSeen || !schemaEndSeen || !rowSeen {
 		t.Fatalf("schema refresh or adapted row missing: %+v", afterDDL)
 	}
 	stop()

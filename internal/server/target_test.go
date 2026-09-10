@@ -61,3 +61,27 @@ func TestSequenceLargerThanPostgresBigintIsRejectedBeforeDatabaseAccess(t *testi
 		t.Fatalf("Store() error = %v", err)
 	}
 }
+
+func TestSafeTargetType(t *testing.T) {
+	nullable := true
+	tests := []struct {
+		name   string
+		table  sourceSchemaTable
+		column sourceSchemaColumn
+		want   string
+		bad    bool
+	}{
+		{name: "postgres numeric", column: sourceSchemaColumn{Type: "numeric(20,4)"}, want: "numeric(20,4)"},
+		{name: "mysql varchar", table: sourceSchemaTable{Engine: "InnoDB"}, column: sourceSchemaColumn{Type: "varchar", ColumnType: "varchar(255)", Nullable: &nullable}, want: "character varying(255)"},
+		{name: "mysql enum rejected", table: sourceSchemaTable{Engine: "InnoDB"}, column: sourceSchemaColumn{Type: "enum", ColumnType: "enum('a','b')"}, bad: true},
+		{name: "postgres injection rejected", column: sourceSchemaColumn{Type: "text; drop table x"}, bad: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := safeTargetType(test.table, test.column)
+			if (err != nil) != test.bad || got != test.want {
+				t.Fatalf("safeTargetType() = %q, %v", got, err)
+			}
+		})
+	}
+}

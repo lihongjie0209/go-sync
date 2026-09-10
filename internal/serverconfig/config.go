@@ -52,11 +52,12 @@ type FileColumn struct {
 }
 
 type Syncer struct {
-	ID          string       `json:"id"`
-	Token       string       `json:"token"`
-	Postgres    Postgres     `json:"postgres"`
-	Tables      []Table      `json:"tables"`
-	FileColumns []FileColumn `json:"file_columns,omitempty"`
+	ID             string       `json:"id"`
+	Token          string       `json:"token"`
+	Postgres       Postgres     `json:"postgres"`
+	Tables         []Table      `json:"tables"`
+	FileColumns    []FileColumn `json:"file_columns,omitempty"`
+	AutoAddColumns bool         `json:"auto_add_nullable_columns,omitempty"`
 }
 
 type Reconcile struct {

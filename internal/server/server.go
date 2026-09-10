@@ -197,6 +197,14 @@ func (s *Service) Connect(stream grpc.BidiStreamingServer[syncv1.CollectorFrame,
 	if !bearerMatches(stream.Context(), token) {
 		return status.Error(codes.Unauthenticated, "invalid syncer credentials")
 	}
+	lease, err := target.acquireLease(stream.Context())
+	if err != nil {
+		if errors.Is(err, errTargetLeaseHeld) {
+			return status.Error(codes.AlreadyExists, err.Error())
+		}
+		return status.Error(codes.Unavailable, "target database lease is unavailable")
+	}
+	defer lease.Close()
 	progress, err := target.Progress(stream.Context())
 	if err != nil {
 		return status.Error(codes.Unavailable, "target database unavailable")
@@ -267,7 +275,7 @@ func (s *Service) Connect(stream grpc.BidiStreamingServer[syncv1.CollectorFrame,
 			return status.Error(codes.InvalidArgument, "event message_id is not canonical")
 		}
 		started := time.Now()
-		if err := target.Store(stream.Context(), message, incoming.Json); err != nil {
+		if err := lease.Store(stream.Context(), target, message, incoming.Json); err != nil {
 			s.metrics.applyErrors.WithLabelValues(hello.SyncerId).Inc()
 			s.setSyncerError(hello.SyncerId, err.Error())
 			return status.Error(codes.FailedPrecondition, "target apply failed")

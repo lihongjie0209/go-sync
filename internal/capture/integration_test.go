@@ -45,6 +45,7 @@ func TestIncompleteSnapshotRestartAndConcurrentWrites(t *testing.T) {
 	c.Tables = []config.Table{{Schema: "public", Name: name}}
 	c.DataDir = t.TempDir()
 	c.URL = "http://127.0.0.1:1"
+	c.Transport = "grpc"
 	c.BatchRows = 1
 	c.BatchBytes = 1024
 	c.MaxRowBytes = 8192
@@ -165,6 +166,42 @@ func TestIncompleteSnapshotRestartAndConcurrentWrites(t *testing.T) {
 		changes += len(m.Rows)
 		if e := q.Ack(m.Seq, m.ID); e != nil {
 			t.Fatal(e)
+		}
+	}
+	if _, err := conn.Exec(ctx, "ALTER TABLE "+ident+" ADD COLUMN extra text; INSERT INTO "+ident+"(id,body,extra) VALUES(202,'after ddl','online')"); err != nil {
+		t.Fatal(err)
+	}
+	schemaEnd, changedRow := false, false
+	for !schemaEnd || !changedRow {
+		m, _, err := q.Peek()
+		if errors.Is(err, queue.ErrEmpty) {
+			select {
+			case runErr := <-done:
+				done <- runErr
+				t.Fatalf("capture exited during schema replay: %v", runErr)
+			case <-ctx.Done():
+				t.Fatal("schema replay timed out")
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Kind == "schema_end" && m.SchemaVersion != "" {
+			schemaEnd = true
+		}
+		for _, row := range m.Rows {
+			if row.Table == name {
+				for _, column := range row.Columns {
+					if column.Name == "extra" && column.Value != nil && *column.Value == "online" && m.SchemaVersion != "" {
+						changedRow = true
+					}
+				}
+			}
+		}
+		if err := q.Ack(m.Seq, m.ID); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

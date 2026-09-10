@@ -33,6 +33,8 @@ type Collector struct {
 	metrics *telemetry.Metrics
 }
 
+var errSchemaRefreshed = errors.New("schema refreshed; replay from durable checkpoint")
+
 // WithMetrics attaches an observer before Run starts.
 func (c *Collector) WithMetrics(m *telemetry.Metrics) *Collector { c.metrics = m; return c }
 
@@ -51,6 +53,7 @@ func transient(err error) bool {
 	// must not be retried indefinitely as a PostgreSQL connection outage.
 	isNetwork := errors.As(err, &opErr) || (errors.As(err, &ne) && ne.Timeout())
 	return isNetwork || errors.Is(err, context.DeadlineExceeded) || pgconn.SafeToRetry(err) ||
+		errors.Is(err, errSchemaRefreshed) ||
 		errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
@@ -73,6 +76,10 @@ func (c *Collector) Run(ctx context.Context) error {
 		}
 		if !retry {
 			return err
+		}
+		if errors.Is(err, errSchemaRefreshed) {
+			delay = minDelay
+			continue
 		}
 		c.log.Warn("postgres connection interrupted; replaying from durable checkpoint")
 		if err := delivery.Wait(ctx, delay); err != nil {
@@ -105,7 +112,7 @@ func (c *Collector) attempt(ctx context.Context) error {
 		}
 		if st.Phase == "stream" && st.SchemaHash != schemaHash(inspection.Tables) {
 			c.metrics.SchemaChanged()
-			return errors.New("schema changed; explicit reinitialization is required")
+			return errors.New("schema changed while collector was offline; explicit reinitialization is required")
 		}
 	}
 	if err := walplugin.Ensure(ctx, c.cfg, c.log); err != nil {
@@ -348,18 +355,6 @@ func (c *Collector) stream(ctx context.Context, tables []Table, version int) err
 			return err
 		}
 		if time.Since(lastFeedback) >= 5*time.Second {
-			// Also check idle tables; column metadata checks below catch DML using
-			// a changed shape before any transaction can become visible locally.
-			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			current, e := catalog(checkCtx, normal, c.cfg.Tables)
-			cancel()
-			if e != nil {
-				return e
-			}
-			if schemaHash(current) != st.SchemaHash {
-				c.metrics.SchemaChanged()
-				return errors.New("schema changed; stop and reinitialize explicitly")
-			}
 			if time.Since(lastMetrics) >= 30*time.Second {
 				currentFn, diffFn := "pg_current_xlog_location", "pg_xlog_location_diff"
 				if version >= 100000 {
@@ -431,6 +426,12 @@ func (c *Collector) stream(ctx context.Context, tables []Table, version int) err
 				}
 				c.metrics.Received(len(x.WALData))
 				if e := d.consume(ctx, x.WALData); e != nil {
+					if errors.Is(e, errSchemaMismatch) {
+						if refreshErr := c.refreshSchemaForReplay(ctx, normal, d.durable, st.SchemaHash); refreshErr != nil {
+							return refreshErr
+						}
+						return errSchemaRefreshed
+					}
 					return e
 				}
 			default:
@@ -442,6 +443,44 @@ func (c *Collector) stream(ctx context.Context, tables []Table, version int) err
 			return errors.New("logical replication ended unexpectedly")
 		}
 	}
+}
+
+func (c *Collector) refreshSchemaForReplay(ctx context.Context, conn *pgx.Conn, durable pglogrepl.LSN, oldHash string) error {
+	if c.cfg.DeliveryTransport() != "grpc" {
+		return errors.New("postgres schema changed; online adaptation requires the standard gRPC server")
+	}
+	current, err := catalog(ctx, conn, c.cfg.Tables)
+	if err != nil {
+		return err
+	}
+	hash := schemaHash(current)
+	if hash == oldHash {
+		return errSchemaMismatch
+	}
+	// A schema mismatch is discovered before its source transaction is locally
+	// published. Discard only those invisible chunks, publish the full schema at
+	// the previous durable LSN, then reconnect so WAL replays under the new map.
+	if err := c.q.Recover(); err != nil {
+		return err
+	}
+	for _, table := range current {
+		raw, err := json.Marshal(table)
+		if err != nil {
+			return err
+		}
+		if err := c.q.Append(event.Message{Kind: "schema", SchemaVersion: hash, Schema: raw}); err != nil {
+			return err
+		}
+	}
+	if err := c.q.Append(event.Message{Kind: "schema_end", SchemaVersion: hash}); err != nil {
+		return err
+	}
+	if err := c.q.PublishSchema(durable.String(), hash); err != nil {
+		return err
+	}
+	c.metrics.SchemaChanged()
+	c.log.InfoContext(ctx, "postgres schema refresh published; replaying WAL transaction", "schema_version", hash, "durable_lsn", durable.String())
+	return nil
 }
 
 func feedback(ctx context.Context, r *pgconn.PgConn, lsn pglogrepl.LSN) error {

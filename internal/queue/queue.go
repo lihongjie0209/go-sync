@@ -234,6 +234,9 @@ func (s *Store) Append(m event.Message) error {
 		}
 		m.SourceID = st.SourceID
 		m.Generation = st.Generation
+		if m.SchemaVersion == "" {
+			m.SchemaVersion = st.SchemaHash
+		}
 		m.Seq = st.NextSeq + 1
 		m.ID = fmt.Sprintf("%s/%s/%d", st.SourceID, st.Generation, m.Seq)
 		m.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -261,6 +264,9 @@ func (s *Store) Publish(lsn string, sealSnapshot bool) error {
 // PublishSchema exposes a complete schema refresh and advances its binlog
 // checkpoint and schema hash in the same local transaction.
 func (s *Store) PublishSchema(lsn, schemaHash string) error {
+	if lsn == "" || schemaHash == "" {
+		return errors.New("schema checkpoint and hash are required")
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		st, err := read(tx)
 		if err != nil {

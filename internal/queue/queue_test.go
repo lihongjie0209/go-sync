@@ -194,6 +194,54 @@ func TestCapacityRollback(t *testing.T) {
 	}
 }
 
+func TestAppendAddsDurableSchemaVersion(t *testing.T) {
+	q := openTest(t)
+	state, err := q.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.SchemaHash = "schema-v1"
+	if err := q.Initialize(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Append(event.Message{Kind: "snapshot_begin"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Publish("0/1", true); err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := q.Peek()
+	if err != nil || message.SchemaVersion != "schema-v1" {
+		t.Fatalf("schema version = %q, error = %v", message.SchemaVersion, err)
+	}
+}
+
+func TestPublishSchemaRequiresCheckpointAndHash(t *testing.T) {
+	q := openTest(t)
+	if err := q.Append(event.Message{Kind: "snapshot_end"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Publish("0/1", true); err != nil {
+		t.Fatal(err)
+	}
+	before, err := q.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][2]string{{"", "schema-v2"}, {"0/2", ""}} {
+		if err := q.PublishSchema(args[0], args[1]); err == nil {
+			t.Fatalf("PublishSchema(%q, %q) succeeded", args[0], args[1])
+		}
+	}
+	after, err := q.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DurableLSN != before.DurableLSN || after.SchemaHash != before.SchemaHash || after.ReadySeq != before.ReadySeq {
+		t.Fatalf("invalid publication changed state: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestExclusiveOwner(t *testing.T) {
 	q := openTest(t)
 	other, e := Open(q.dir, 1<<20, 0)

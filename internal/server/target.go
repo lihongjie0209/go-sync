@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +12,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +20,10 @@ import (
 	"go-sync/internal/event"
 	"go-sync/internal/serverconfig"
 )
+
+const applyPageSize = 512
+
+var errTargetLeaseHeld = errors.New("syncer is owned by another server instance")
 
 type target struct {
 	cfg   serverconfig.Syncer
@@ -26,9 +33,45 @@ type target struct {
 }
 
 type progress struct {
-	Generation string
-	Received   uint64
-	Applied    uint64
+	Generation    string
+	Received      uint64
+	Applied       uint64
+	SchemaVersion string
+}
+
+type targetLease struct {
+	conn *pgxpool.Conn
+	key  string
+}
+
+func (t *target) acquireLease(ctx context.Context) (*targetLease, error) {
+	conn, err := t.pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := t.cfg.Postgres.MetadataSchema + ":" + t.cfg.ID
+	var locked bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtextextended($1,0))", key).Scan(&locked); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	if !locked {
+		conn.Release()
+		return nil, errTargetLeaseHeld
+	}
+	return &targetLease{conn: conn, key: key}, nil
+}
+
+func (l *targetLease) Close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var unlocked bool
+	if err := l.conn.QueryRow(ctx, "SELECT pg_advisory_unlock(hashtextextended($1,0))", l.key).Scan(&unlocked); err != nil || !unlocked {
+		connection := l.conn.Hijack()
+		_ = connection.Close(ctx)
+		return
+	}
+	l.conn.Release()
 }
 
 func openTarget(ctx context.Context, cfg serverconfig.Syncer) (*target, error) {
@@ -76,7 +119,13 @@ func (t *target) migrate(ctx context.Context) error {
             received_seq bigint NOT NULL DEFAULT 0,
             applied_seq bigint NOT NULL DEFAULT 0,
             phase text NOT NULL DEFAULT '',
+		    open_transaction text NOT NULL DEFAULT '',
+		    schema_version text NOT NULL DEFAULT '',
+		    pending_schema_version text NOT NULL DEFAULT '',
             updated_at timestamptz NOT NULL DEFAULT clock_timestamp())`,
+		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS open_transaction text NOT NULL DEFAULT ''",
+		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT ''",
+		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS pending_schema_version text NOT NULL DEFAULT ''",
 		"CREATE TABLE IF NOT EXISTS " + meta + `.server_instance (
             singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), instance_id text NOT NULL)`,
 		"CREATE TABLE IF NOT EXISTS " + meta + `.inbox (
@@ -91,6 +140,14 @@ func (t *target) migrate(ctx context.Context) error {
             syncer_id text NOT NULL, generation text NOT NULL, seq bigint NOT NULL,
             row_ordinal bigint NOT NULL, payload bytea NOT NULL,
             PRIMARY KEY(syncer_id, generation, seq, row_ordinal))`,
+		"CREATE TABLE IF NOT EXISTS " + meta + `.message_hash (
+            syncer_id text NOT NULL, generation text NOT NULL, seq bigint NOT NULL,
+            payload_hash bytea NOT NULL,
+            PRIMARY KEY(syncer_id, generation, seq))`,
+		"CREATE TABLE IF NOT EXISTS " + meta + `.schema_stage (
+            syncer_id text NOT NULL, generation text NOT NULL, schema_version text NOT NULL,
+            source_schema text NOT NULL, table_name text NOT NULL, payload bytea NOT NULL,
+            PRIMARY KEY(syncer_id, generation, schema_version, source_schema, table_name))`,
 	}
 	for _, statement := range statements {
 		if _, err := t.pool.Exec(ctx, statement); err != nil {
@@ -112,25 +169,40 @@ func (t *target) identity(ctx context.Context) (string, error) {
 
 func (t *target) Progress(ctx context.Context) (progress, error) {
 	var p progress
-	err := t.pool.QueryRow(ctx, "SELECT generation, received_seq, applied_seq FROM "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state WHERE syncer_id=$1", t.cfg.ID).
-		Scan(&p.Generation, &p.Received, &p.Applied)
+	err := t.pool.QueryRow(ctx, "SELECT generation, received_seq, applied_seq, schema_version FROM "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state WHERE syncer_id=$1", t.cfg.ID).
+		Scan(&p.Generation, &p.Received, &p.Applied, &p.SchemaVersion)
 	return p, err
 }
 
 func (t *target) Store(ctx context.Context, message event.Message, raw []byte) error {
+	return t.store(ctx, t.pool, message, raw)
+}
+
+type transactionBeginner interface {
+	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+}
+
+func (l *targetLease) Store(ctx context.Context, target *target, message event.Message, raw []byte) error {
+	return target.store(ctx, l.conn, message, raw)
+}
+
+func (t *target) store(ctx context.Context, beginner transactionBeginner, message event.Message, raw []byte) error {
 	if message.Seq > math.MaxInt64 {
 		return errors.New("message sequence exceeds PostgreSQL bigint")
 	}
-	tx, err := t.pool.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginner.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	meta := quote(t.cfg.Postgres.MetadataSchema)
+	payloadHash := sha256.Sum256(raw)
 	var current progress
 	var phase string
-	if err := tx.QueryRow(ctx, "SELECT generation, received_seq, applied_seq, phase FROM "+meta+".sync_state WHERE syncer_id=$1 FOR UPDATE", t.cfg.ID).
-		Scan(&current.Generation, &current.Received, &current.Applied, &phase); err != nil {
+	var openTransaction string
+	var pendingSchemaVersion string
+	if err := tx.QueryRow(ctx, "SELECT generation, received_seq, applied_seq, phase, open_transaction, schema_version, pending_schema_version FROM "+meta+".sync_state WHERE syncer_id=$1 FOR UPDATE", t.cfg.ID).
+		Scan(&current.Generation, &current.Received, &current.Applied, &phase, &openTransaction, &current.SchemaVersion, &pendingSchemaVersion); err != nil {
 		return err
 	}
 	if message.Generation != current.Generation {
@@ -146,27 +218,97 @@ func (t *target) Store(ctx context.Context, message event.Message, raw []byte) e
 		if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".snapshot_scope WHERE syncer_id=$1", t.cfg.ID); err != nil {
 			return err
 		}
-		current = progress{Generation: message.Generation}
+		if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".message_hash WHERE syncer_id=$1", t.cfg.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".schema_stage WHERE syncer_id=$1", t.cfg.ID); err != nil {
+			return err
+		}
+		current = progress{Generation: message.Generation, SchemaVersion: message.SchemaVersion}
 		phase = ""
+		openTransaction = ""
+		pendingSchemaVersion = ""
 	}
 	if message.Seq <= current.Received {
+		var storedHash []byte
+		err := tx.QueryRow(ctx, "SELECT payload_hash FROM "+meta+".message_hash WHERE syncer_id=$1 AND generation=$2 AND seq=$3", t.cfg.ID, message.Generation, int64(message.Seq)).Scan(&storedHash)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err == nil && !bytes.Equal(storedHash, payloadHash[:]) {
+			return fmt.Errorf("sequence %d was already stored with a different payload", message.Seq)
+		}
 		return tx.Commit(ctx)
 	}
 	if message.Seq != current.Received+1 {
 		return fmt.Errorf("non-contiguous message: got %d, want %d", message.Seq, current.Received+1)
 	}
+	if message.Kind == "schema" && phase == "stream" {
+		if message.SchemaVersion == "" {
+			return errors.New("stream schema refresh requires schema_version")
+		}
+		if pendingSchemaVersion == "" {
+			pendingSchemaVersion = message.SchemaVersion
+		} else if pendingSchemaVersion != message.SchemaVersion {
+			return errors.New("schema refresh version changed before schema_end")
+		}
+	} else if message.Kind == "schema_end" {
+		if phase != "stream" || message.SchemaVersion == "" || message.SchemaVersion != pendingSchemaVersion {
+			return errors.New("schema_end does not match pending schema refresh")
+		}
+	} else {
+		if pendingSchemaVersion != "" {
+			return errors.New("schema refresh must finish before row delivery")
+		}
+		if message.SchemaVersion != current.SchemaVersion {
+			return fmt.Errorf("message schema_version %q does not match active version %q", message.SchemaVersion, current.SchemaVersion)
+		}
+	}
+	switch message.Kind {
+	case "transaction_rows":
+		if message.Transaction == "" {
+			return errors.New("transaction_rows requires a transaction identifier")
+		}
+		if openTransaction == "" {
+			openTransaction = message.Transaction
+		} else if openTransaction != message.Transaction {
+			return fmt.Errorf("transaction %q is still open", openTransaction)
+		}
+	case "transaction_end":
+		if message.Transaction == "" || openTransaction != message.Transaction {
+			return fmt.Errorf("transaction_end %q does not match open transaction %q", message.Transaction, openTransaction)
+		}
+	case "schema":
+		if openTransaction != "" {
+			return errors.New("schema cannot be applied inside a transaction")
+		}
+	}
 	if err := t.applyMessage(ctx, tx, message, raw, &phase); err != nil {
 		return err
 	}
-	applied := current.Applied
-	if message.Kind == "snapshot_end" || message.Kind == "transaction_end" || (phase == "stream" && message.Kind == "schema") {
-		applied = message.Seq
+	if message.Kind == "transaction_end" {
+		openTransaction = ""
 	}
-	if _, err := tx.Exec(ctx, "UPDATE "+meta+".sync_state SET generation=$2, received_seq=$3, applied_seq=$4, phase=$5, updated_at=clock_timestamp() WHERE syncer_id=$1",
-		t.cfg.ID, message.Generation, int64(message.Seq), int64(applied), phase); err != nil {
+	if message.Kind == "schema_end" {
+		current.SchemaVersion = pendingSchemaVersion
+		pendingSchemaVersion = ""
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO "+meta+".message_hash(syncer_id,generation,seq,payload_hash) VALUES($1,$2,$3,$4)", t.cfg.ID, message.Generation, int64(message.Seq), payloadHash[:]); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	applied := current.Applied
+	if message.Kind == "snapshot_end" || message.Kind == "transaction_end" || message.Kind == "schema_end" {
+		applied = message.Seq
+	}
+	if _, err := tx.Exec(ctx, "UPDATE "+meta+".sync_state SET generation=$2, received_seq=$3, applied_seq=$4, phase=$5, open_transaction=$6, schema_version=$7, pending_schema_version=$8, updated_at=clock_timestamp() WHERE syncer_id=$1",
+		t.cfg.ID, message.Generation, int64(message.Seq), int64(applied), phase, openTransaction, current.SchemaVersion, pendingSchemaVersion); err != nil {
+		return err
+	}
+	err = tx.Commit(ctx)
+	if err == nil && (message.Kind == "snapshot_end" || message.Kind == "schema_end") {
+		t.invalidateTypes()
+	}
+	return err
 }
 
 func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Message, raw []byte, phase *string) error {
@@ -192,23 +334,40 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 		if *phase != "snapshot" && *phase != "stream" {
 			return errors.New("schema received outside a synchronization phase")
 		}
+		if message.SchemaVersion != "" {
+			return t.stageSchema(ctx, tx, message)
+		}
 	case "snapshot_rows":
 		if *phase != "snapshot" {
 			return errors.New("snapshot rows received outside snapshot")
 		}
+		batch := &pgx.Batch{}
 		for i, row := range message.Rows {
 			payload, err := json.Marshal(row)
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, "INSERT INTO "+meta+".snapshot_rows(syncer_id,generation,seq,row_ordinal,payload) VALUES($1,$2,$3,$4,$5)",
-				t.cfg.ID, message.Generation, int64(message.Seq), i, payload); err != nil {
+			batch.Queue("INSERT INTO "+meta+".snapshot_rows(syncer_id,generation,seq,row_ordinal,payload) VALUES($1,$2,$3,$4,$5)",
+				t.cfg.ID, message.Generation, int64(message.Seq), i, payload)
+		}
+		results := tx.SendBatch(ctx, batch)
+		for range message.Rows {
+			if _, err := results.Exec(); err != nil {
+				_ = results.Close()
 				return err
 			}
+		}
+		if err := results.Close(); err != nil {
+			return err
 		}
 	case "snapshot_end":
 		if *phase != "snapshot" {
 			return errors.New("snapshot_end received outside snapshot")
+		}
+		if message.SchemaVersion != "" {
+			if err := t.applyStagedSchemas(ctx, tx, message.Generation, message.SchemaVersion); err != nil {
+				return err
+			}
 		}
 		rows, err := tx.Query(ctx, "SELECT source_schema,table_name FROM "+meta+".snapshot_scope WHERE syncer_id=$1 ORDER BY ordinal", t.cfg.ID)
 		if err != nil {
@@ -223,6 +382,10 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 			}
 			scope = append(scope, table)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
 		rows.Close()
 		for i := len(scope) - 1; i >= 0; i-- {
 			table := scope[i]
@@ -230,29 +393,41 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 				return err
 			}
 		}
-		staged, err := tx.Query(ctx, "SELECT payload FROM "+meta+".snapshot_rows WHERE syncer_id=$1 AND generation=$2 ORDER BY seq,row_ordinal", t.cfg.ID, message.Generation)
-		if err != nil {
-			return err
-		}
-		var snapshot []event.Row
-		for staged.Next() {
-			var payload []byte
-			if err := staged.Scan(&payload); err != nil {
-				staged.Close()
+		var lastSeq, lastOrdinal int64 = -1, -1
+		for {
+			staged, err := tx.Query(ctx, "SELECT seq,row_ordinal,payload FROM "+meta+`.snapshot_rows
+                WHERE syncer_id=$1 AND generation=$2 AND (seq,row_ordinal)>($3,$4)
+                ORDER BY seq,row_ordinal LIMIT $5`, t.cfg.ID, message.Generation, lastSeq, lastOrdinal, applyPageSize)
+			if err != nil {
 				return err
 			}
-			var row event.Row
-			if err := json.Unmarshal(payload, &row); err != nil {
-				staged.Close()
-				return err
+			batch := make([]event.Row, 0, applyPageSize)
+			for staged.Next() {
+				var payload []byte
+				if err := staged.Scan(&lastSeq, &lastOrdinal, &payload); err != nil {
+					staged.Close()
+					return err
+				}
+				var row event.Row
+				if err := json.Unmarshal(payload, &row); err != nil {
+					staged.Close()
+					return err
+				}
+				batch = append(batch, row)
 			}
-			snapshot = append(snapshot, row)
-		}
-		staged.Close()
-		for _, row := range snapshot {
-			row.Operation = "insert"
-			if err := t.applyRow(ctx, tx, row); err != nil {
-				return err
+			iterationErr := staged.Err()
+			staged.Close()
+			if iterationErr != nil {
+				return iterationErr
+			}
+			for _, row := range batch {
+				row.Operation = "insert"
+				if err := t.applyRow(ctx, tx, row); err != nil {
+					return err
+				}
+			}
+			if len(batch) < applyPageSize {
+				break
 			}
 		}
 		if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".snapshot_rows WHERE syncer_id=$1", t.cfg.ID); err != nil {
@@ -262,6 +437,11 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 			return err
 		}
 		*phase = "stream"
+	case "schema_end":
+		if *phase != "stream" {
+			return errors.New("schema_end received outside stream")
+		}
+		return t.applyStagedSchemas(ctx, tx, message.Generation, message.SchemaVersion)
 	case "transaction_rows":
 		if *phase != "stream" {
 			return errors.New("transaction rows received before snapshot publication")
@@ -273,39 +453,51 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 		if *phase != "stream" {
 			return errors.New("transaction end received before snapshot publication")
 		}
-		rows, err := tx.Query(ctx, "SELECT seq,payload FROM "+meta+".inbox WHERE syncer_id=$1 AND generation=$2 ORDER BY seq", t.cfg.ID, message.Generation)
-		if err != nil {
-			return err
-		}
-		var chunks []event.Message
-		var sequences []int64
-		for rows.Next() {
-			var seq int64
-			var payload []byte
-			if err := rows.Scan(&seq, &payload); err != nil {
-				rows.Close()
+		var lastSeq int64 = -1
+		for {
+			rows, err := tx.Query(ctx, "SELECT seq,payload FROM "+meta+".inbox WHERE syncer_id=$1 AND generation=$2 AND seq>$3 ORDER BY seq LIMIT $4", t.cfg.ID, message.Generation, lastSeq, applyPageSize)
+			if err != nil {
 				return err
 			}
-			var chunk event.Message
-			if err := json.Unmarshal(payload, &chunk); err != nil {
-				rows.Close()
-				return err
+			type inboxChunk struct {
+				seq     int64
+				message event.Message
 			}
-			if chunk.Transaction == message.Transaction {
-				chunks, sequences = append(chunks, chunk), append(sequences, seq)
+			batch := make([]inboxChunk, 0, applyPageSize)
+			for rows.Next() {
+				var item inboxChunk
+				var payload []byte
+				if err := rows.Scan(&item.seq, &payload); err != nil {
+					rows.Close()
+					return err
+				}
+				lastSeq = item.seq
+				if err := json.Unmarshal(payload, &item.message); err != nil {
+					rows.Close()
+					return err
+				}
+				batch = append(batch, item)
 			}
-		}
-		rows.Close()
-		for _, chunk := range chunks {
-			for _, row := range chunk.Rows {
-				if err := t.applyRow(ctx, tx, row); err != nil {
+			iterationErr := rows.Err()
+			rows.Close()
+			if iterationErr != nil {
+				return iterationErr
+			}
+			for _, item := range batch {
+				if item.message.Transaction != message.Transaction {
+					continue
+				}
+				for _, row := range item.message.Rows {
+					if err := t.applyRow(ctx, tx, row); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".inbox WHERE syncer_id=$1 AND generation=$2 AND seq=$3", t.cfg.ID, message.Generation, item.seq); err != nil {
 					return err
 				}
 			}
-		}
-		for _, seq := range sequences {
-			if _, err := tx.Exec(ctx, "DELETE FROM "+meta+".inbox WHERE syncer_id=$1 AND generation=$2 AND seq=$3", t.cfg.ID, message.Generation, seq); err != nil {
-				return err
+			if len(batch) < applyPageSize {
+				break
 			}
 		}
 	default:

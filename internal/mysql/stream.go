@@ -172,8 +172,13 @@ func (c *Collector) refreshSchema(ctx context.Context, pos uint32, file string, 
 		if e != nil {
 			return e
 		}
-		if e = c.q.Append(event.Message{Kind: "schema", Schema: raw}); e != nil {
+		if e = c.q.Append(event.Message{Kind: "schema", SchemaVersion: hash, Schema: raw}); e != nil {
 			return e
+		}
+	}
+	if c.cfg.DeliveryTransport() == "grpc" {
+		if err = c.q.Append(event.Message{Kind: "schema_end", SchemaVersion: hash}); err != nil {
+			return err
 		}
 	}
 	if err = c.q.PublishSchema(checkpoint, hash); err != nil {
