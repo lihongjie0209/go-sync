@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -43,6 +44,25 @@ func TestConfigurationValidation(t *testing.T) {
 				t.Fatal("invalid config accepted")
 			}
 		})
+	}
+}
+
+func TestFileWatchConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.SourceType = "files"
+	cfg.SourceID = "file-source"
+	cfg.DSN = ""
+	cfg.URL = "http://127.0.0.1/events"
+	cfg.Slot = ""
+	cfg.Tables = nil
+	cfg.DataDir = filepath.Join(t.TempDir(), "state")
+	cfg.FileWatch.RootDir = filepath.Join(t.TempDir(), "input")
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.FileWatch.Events = []string{"create", "create"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("duplicate file event was accepted")
 	}
 }
 

@@ -293,9 +293,9 @@ func (s *Service) Connect(stream grpc.BidiStreamingServer[syncv1.CollectorFrame,
 			return err
 		}
 		switch message.Kind {
-		case "snapshot_begin", "transaction_rows":
+		case "snapshot_begin", "transaction_rows", "file_begin", "file_chunk":
 			openBatch = true
-		case "snapshot_end", "transaction_end":
+		case "snapshot_end", "transaction_end", "file_end":
 			openBatch = false
 		}
 		next++

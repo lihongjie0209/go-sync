@@ -22,5 +22,17 @@
     "postgres": {"dsn": "${PMS_TARGET_DSN}", "target_schema": "pms", "metadata_schema": "go_sync_meta"},
     "tables": [{"source_schema": "public", "name": "documents"}],
     "file_columns": [{"source_schema": "public", "table": "documents", "source_column": "file_path", "content_column": "file_content"}]
+  }, {
+    "id": "files-client-01",
+    "token": "${FILES_SYNC_TOKEN}",
+    "postgres": {"dsn": "${PMS_TARGET_DSN}", "target_schema": "pms", "metadata_schema": "go_sync_meta"},
+    "tables": [],
+    "file_storage": {
+      "backend": "directory",
+      "directory": "D:\\go-sync\\received",
+      "prefix": "files-client-01",
+      "events": ["create", "update"],
+      "max_file_bytes": 1073741824
+    }
   }]
 }

@@ -44,6 +44,8 @@ type Metrics struct {
 	legacyDeleted, legacyDeleteErrors                                 prometheus.Counter
 	legacyPollDuration                                                prometheus.Histogram
 	legacyPolls                                                       *prometheus.CounterVec
+	fileEvents                                                        *prometheus.CounterVec
+	fileBytes                                                         prometheus.Counter
 }
 
 func New(q *queue.Store, c config.Config) *Metrics {
@@ -114,6 +116,12 @@ func New(q *queue.Store, c config.Config) *Metrics {
 	reg.MustRegister(m.legacyPolls)
 	for _, result := range []string{"progress", "idle", "error", "canceled"} {
 		m.legacyPolls.WithLabelValues(result)
+	}
+	m.fileEvents = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "go_sync", Name: "file_events_total", Help: "Filesystem events durably published by operation."}, []string{"operation"})
+	m.fileBytes = counter("file_content_bytes_total", "File content bytes durably published, before base64 encoding and retransmission.")
+	reg.MustRegister(m.fileEvents)
+	for _, operation := range []string{"create", "update", "delete"} {
+		m.fileEvents.WithLabelValues(operation)
 	}
 	// Dashboard: go_sync_sqlserver_snapshot_scanned_rows
 	m.sqlSnapshotActive = gauge("sqlserver_snapshot_active", "One during a SQL Server snapshot attempt, including waits.")
@@ -280,6 +288,16 @@ func (m *Metrics) SchemaChanged() {
 	if m != nil {
 		m.schemaChanges.Inc()
 	}
+}
+func (m *Metrics) FileCaptured(operation string, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.fileEvents.WithLabelValues(operation).Inc()
+	if bytes > 0 {
+		m.fileBytes.Add(float64(bytes))
+	}
+	m.lastCommit.SetToCurrentTime()
 }
 func (m *Metrics) QueueFull() {
 	if m != nil {

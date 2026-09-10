@@ -4,12 +4,16 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -56,7 +60,8 @@ func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 	}
 	cfg := serverconfig.Syncer{ID: "client", Token: "token", AutoAddColumns: true, Postgres: serverconfig.Postgres{DSN: dsn, TargetSchema: "public", MetadataSchema: "go_sync_meta"},
 		Tables:      []serverconfig.Table{{SourceSchema: "src", Name: "documents"}, {SourceSchema: "src", Name: "bag"}},
-		FileColumns: []serverconfig.FileColumn{{SourceSchema: "src", Table: "documents", SourceColumn: "path", ContentColumn: "content"}}}
+		FileColumns: []serverconfig.FileColumn{{SourceSchema: "src", Table: "documents", SourceColumn: "path", ContentColumn: "content"}},
+		FileStorage: serverconfig.FileStorage{Backend: "directory", Directory: t.TempDir(), Events: []string{"create", "update"}, MaxFileBytes: 1 << 20}}
 	target, err := openTarget(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -218,17 +223,47 @@ func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 	if err := conn.QueryRow(ctx, "SELECT extra FROM documents WHERE id=2000").Scan(&extra); err != nil || extra != "new-value" {
 		t.Fatalf("incremental row did not use refreshed schema: %q %v", extra, err)
 	}
+	filePayload := []byte("standalone file body")
+	fileHash := sha256.Sum256(filePayload)
+	fileMeta := &event.FileChange{Path: "nested/report.txt", Operation: "create", Size: int64(len(filePayload)), Mode: 0o640, SHA256: hex.EncodeToString(fileHash[:]), Chunks: 1}
+	fileBegin := event.Message{Kind: "file_begin", Transaction: "file-1", SchemaVersion: "schema-v2", File: fileMeta}
+	storeMessage(t, ctx, target, &fileBegin, 9, "g2")
+	chunkMeta := *fileMeta
+	chunkMeta.Data = base64.StdEncoding.EncodeToString(filePayload)
+	fileChunk := event.Message{Kind: "file_chunk", Transaction: "file-1", SchemaVersion: "schema-v2", File: &chunkMeta}
+	storeMessage(t, ctx, target, &fileChunk, 10, "g2")
+	badMeta := *fileMeta
+	badHash := sha256.Sum256([]byte("different"))
+	badMeta.SHA256 = hex.EncodeToString(badHash[:])
+	badEnd := event.Message{Kind: "file_end", Transaction: "file-1", SchemaVersion: "schema-v2", File: &badMeta}
+	if err := storeMessageError(ctx, target, &badEnd, 11, "g2"); err == nil {
+		t.Fatal("inconsistent file batch was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.FileStorage.Directory, "nested", "report.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed file batch became visible: %v", err)
+	}
+	fileEnd := event.Message{Kind: "file_end", Transaction: "file-1", SchemaVersion: "schema-v2", File: fileMeta}
+	storeMessage(t, ctx, target, &fileEnd, 11, "g2")
+	storedFile, err := os.ReadFile(filepath.Join(cfg.FileStorage.Directory, "nested", "report.txt"))
+	if err != nil || string(storedFile) != string(filePayload) {
+		t.Fatalf("standalone file was not committed: %q %v", storedFile, err)
+	}
+	fileDelete := event.Message{Kind: "file_delete", SchemaVersion: "schema-v2", File: &event.FileChange{Path: "nested/report.txt", Operation: "delete"}}
+	storeMessage(t, ctx, target, &fileDelete, 12, "g2")
+	if _, err := os.Stat(filepath.Join(cfg.FileStorage.Directory, "nested", "report.txt")); err != nil {
+		t.Fatalf("server delete filter did not retain file: %v", err)
+	}
 
 	unsafeSchema := event.Message{Kind: "schema", SchemaVersion: "schema-v3", Schema: json.RawMessage(`{
         "schema":"src","name":"documents","columns":[
         {"name":"id","type":"bigint","not_null":true,"primary_key":true},
         {"name":"required_new","type":"text","not_null":true}]}`)}
-	storeMessage(t, ctx, target, &unsafeSchema, 9, "g2")
+	storeMessage(t, ctx, target, &unsafeSchema, 13, "g2")
 	unsafeBag := bagSchema
 	unsafeBag.SchemaVersion = "schema-v3"
-	storeMessage(t, ctx, target, &unsafeBag, 10, "g2")
+	storeMessage(t, ctx, target, &unsafeBag, 14, "g2")
 	unsafeEnd := event.Message{Kind: "schema_end", SchemaVersion: "schema-v3"}
-	if err := storeMessageError(ctx, target, &unsafeEnd, 11, "g2"); err == nil {
+	if err := storeMessageError(ctx, target, &unsafeEnd, 15, "g2"); err == nil {
 		t.Fatal("non-null target column was added automatically")
 	}
 	var requiredExists bool

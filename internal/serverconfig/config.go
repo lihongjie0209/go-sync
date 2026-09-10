@@ -11,7 +11,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	_ "time/tzdata"
@@ -51,6 +54,23 @@ type FileColumn struct {
 	ContentColumn string `json:"content_column"`
 }
 
+// FileStorage stores file-watch events. PostgreSQL remains the durable event
+// checkpoint; the selected backend stores only committed file contents.
+type FileStorage struct {
+	Backend      string   `json:"backend,omitempty"`
+	Directory    string   `json:"directory,omitempty"`
+	Endpoint     string   `json:"endpoint,omitempty"`
+	Region       string   `json:"region,omitempty"`
+	Bucket       string   `json:"bucket,omitempty"`
+	Prefix       string   `json:"prefix,omitempty"`
+	AccessKey    string   `json:"access_key,omitempty"`
+	SecretKey    string   `json:"secret_key,omitempty"`
+	SessionToken string   `json:"session_token,omitempty"`
+	Secure       bool     `json:"secure,omitempty"`
+	Events       []string `json:"events,omitempty"`
+	MaxFileBytes int64    `json:"max_file_bytes,omitempty"`
+}
+
 type Syncer struct {
 	ID             string       `json:"id"`
 	Token          string       `json:"token"`
@@ -58,6 +78,7 @@ type Syncer struct {
 	Tables         []Table      `json:"tables"`
 	FileColumns    []FileColumn `json:"file_columns,omitempty"`
 	AutoAddColumns bool         `json:"auto_add_nullable_columns,omitempty"`
+	FileStorage    FileStorage  `json:"file_storage,omitempty"`
 }
 
 type Reconcile struct {
@@ -106,6 +127,9 @@ func Load(path string) (Config, error) {
 	for i := range c.Syncers {
 		c.Syncers[i].Token = os.ExpandEnv(c.Syncers[i].Token)
 		c.Syncers[i].Postgres.DSN = os.ExpandEnv(c.Syncers[i].Postgres.DSN)
+		c.Syncers[i].FileStorage.AccessKey = os.ExpandEnv(c.Syncers[i].FileStorage.AccessKey)
+		c.Syncers[i].FileStorage.SecretKey = os.ExpandEnv(c.Syncers[i].FileStorage.SecretKey)
+		c.Syncers[i].FileStorage.SessionToken = os.ExpandEnv(c.Syncers[i].FileStorage.SessionToken)
 	}
 	for key, value := range c.VictoriaMetrics.Headers {
 		c.VictoriaMetrics.Headers[key] = os.ExpandEnv(value)
@@ -171,6 +195,7 @@ func (c Config) Validate() error {
 	}
 	seenIDs := make(map[string]struct{}, len(c.Syncers))
 	seenTargets := make(map[string]string)
+	fileTargets := make(map[string]string)
 	for i := range c.Syncers {
 		s := &c.Syncers[i]
 		if !syncerID.MatchString(s.ID) || s.Token == "" || s.Postgres.DSN == "" || strings.ContainsAny(s.Token, "\r\n") || len(s.Token) > 4096 {
@@ -186,8 +211,20 @@ func (c Config) Validate() error {
 		if !identifier.MatchString(s.Postgres.TargetSchema) || !identifier.MatchString(s.Postgres.MetadataSchema) {
 			return fmt.Errorf("syncer %q has an invalid PostgreSQL schema", s.ID)
 		}
-		if len(s.Tables) == 0 {
+		if len(s.Tables) == 0 && s.FileStorage.Backend == "" {
 			return fmt.Errorf("syncer %q has no tables", s.ID)
+		}
+		if err := s.FileStorage.validate(s.ID); err != nil {
+			return err
+		}
+		if s.FileStorage.Backend != "" {
+			key := fileStorageKey(s.FileStorage)
+			for existing, owner := range fileTargets {
+				if storageKeysOverlap(existing, key) {
+					return fmt.Errorf("syncers %q and %q have overlapping file storage", owner, s.ID)
+				}
+			}
+			fileTargets[key] = s.ID
 		}
 		tables := make(map[string]struct{}, len(s.Tables))
 		for _, table := range s.Tables {
@@ -212,6 +249,84 @@ func (c Config) Validate() error {
 				return fmt.Errorf("syncer %q file mapping references an invalid table or column", s.ID)
 			}
 		}
+	}
+	return nil
+}
+
+func fileStorageKey(storage FileStorage) string {
+	if storage.Backend == "directory" {
+		return "directory\x00" + filepath.Clean(filepath.Join(storage.Directory, filepath.FromSlash(storage.Prefix)))
+	}
+	return "object\x00" + strings.ToLower(storage.Endpoint) + "\x00" + storage.Bucket + "\x00" + path.Clean("/"+storage.Prefix)
+}
+
+func storageKeysOverlap(a, b string) bool {
+	aParts, bParts := strings.Split(a, "\x00"), strings.Split(b, "\x00")
+	if len(aParts) != len(bParts) || !slices.Equal(aParts[:len(aParts)-1], bParts[:len(bParts)-1]) {
+		return false
+	}
+	if aParts[0] == "directory" {
+		return filePathsOverlap(aParts[len(aParts)-1], bParts[len(bParts)-1])
+	}
+	aPrefix, bPrefix := strings.Trim(aParts[len(aParts)-1], "/"), strings.Trim(bParts[len(bParts)-1], "/")
+	return aPrefix == bPrefix || strings.HasPrefix(aPrefix, bPrefix+"/") || strings.HasPrefix(bPrefix, aPrefix+"/")
+}
+
+func filePathsOverlap(a, b string) bool {
+	contains := func(parent, child string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	return contains(a, b) || contains(b, a)
+}
+
+func (f *FileStorage) validate(syncer string) error {
+	if f.Backend == "" {
+		return nil
+	}
+	f.Backend = strings.ToLower(f.Backend)
+	if len(f.Events) == 0 {
+		f.Events = []string{"create", "update", "delete"}
+	}
+	if f.MaxFileBytes == 0 {
+		f.MaxFileBytes = 1 << 30
+	}
+	if f.MaxFileBytes < 1<<20 || f.MaxFileBytes > 1<<40 {
+		return fmt.Errorf("syncer %q file_storage.max_file_bytes must be between 1 MiB and 1 TiB", syncer)
+	}
+	seen := make(map[string]bool, len(f.Events))
+	for _, operation := range f.Events {
+		if operation != "create" && operation != "update" && operation != "delete" || seen[operation] {
+			return fmt.Errorf("syncer %q has invalid or duplicate file_storage event", syncer)
+		}
+		seen[operation] = true
+	}
+	if strings.ContainsRune(f.Prefix+f.Directory+f.Endpoint+f.Bucket, 0) || filepath.IsAbs(f.Prefix) || strings.Contains(f.Prefix, "..") {
+		return fmt.Errorf("syncer %q has invalid file_storage paths", syncer)
+	}
+	switch f.Backend {
+	case "directory":
+		if !filepath.IsAbs(f.Directory) {
+			return fmt.Errorf("syncer %q file_storage.directory must be absolute", syncer)
+		}
+	case "s3", "oss":
+		if f.Endpoint == "" || f.Bucket == "" || f.AccessKey == "" || f.SecretKey == "" {
+			return fmt.Errorf("syncer %q object storage requires endpoint, bucket, access_key and secret_key", syncer)
+		}
+		if strings.ContainsAny(f.AccessKey+f.SecretKey+f.SessionToken, "\r\n") {
+			return fmt.Errorf("syncer %q has invalid object storage credentials", syncer)
+		}
+		if strings.ContainsAny(f.Endpoint, "\r\n") {
+			return fmt.Errorf("syncer %q has an invalid object storage endpoint", syncer)
+		}
+		if f.Backend == "oss" {
+			u, err := url.Parse(f.Endpoint)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+				return fmt.Errorf("syncer %q OSS endpoint must be an http(s) URL without credentials", syncer)
+			}
+		}
+	default:
+		return fmt.Errorf("syncer %q file_storage.backend must be directory, s3 or oss", syncer)
 	}
 	return nil
 }
@@ -244,6 +359,10 @@ func (s Syncer) FileMapping(schema, table, column string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (s Syncer) AllowsFileOperation(operation string) bool {
+	return s.FileStorage.Backend != "" && slices.Contains(s.FileStorage.Events, operation)
 }
 
 func SafeURL(raw string) string {

@@ -1,0 +1,30 @@
+{
+  "source_type": "files",
+  "source_id": "files-client-01",
+  "transport": "grpc",
+  "file_watch": {
+    "root_dir": "D:\\data\\outgoing",
+    "scan_interval": "5s",
+    "include": ["*.pdf", "reports\\*"],
+    "exclude": ["*.tmp"],
+    "events": ["create", "update", "delete"],
+    "max_file_bytes": 1073741824,
+    "chunk_bytes": 4194304
+  },
+  "data_dir": "D:\\go-sync\\files-state",
+  "grpc": {
+    "address": "sync.example.com:7443",
+    "token": "${GO_SYNC_TOKEN}",
+    "tls": {"ca_file": "D:\\go-sync\\ca.pem", "server_name": "sync.example.com"},
+    "metrics_interval": "30s"
+  },
+  "queue_bytes": 10737418240,
+  "reserve_bytes": 268435456,
+  "batch_rows": 500,
+  "batch_bytes": 1048576,
+  "max_row_bytes": 16777216,
+  "http_timeout": "30s",
+  "retry_min": "1s",
+  "retry_max": "60s",
+  "replay": {"max_age": "168h", "max_bytes": 21474836480}
+}

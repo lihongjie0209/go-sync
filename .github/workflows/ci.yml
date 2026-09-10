@@ -68,5 +68,5 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: Test PostgreSQL, SQL Server, MySQL 5.6 and MySQL 5.7 with Testcontainers
+      - name: Test PostgreSQL, SQL Server, MySQL 5.6, MySQL 5.7 and S3 with Testcontainers
         run: go test -race -count=1 -timeout=55m -tags=integration ./...

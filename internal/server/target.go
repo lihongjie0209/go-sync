@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go-sync/internal/event"
+	"go-sync/internal/filestore"
 	"go-sync/internal/serverconfig"
 )
 
@@ -30,6 +33,7 @@ type target struct {
 	pool  *pgxpool.Pool
 	mu    sync.RWMutex
 	types map[string]map[string]string
+	files filestore.Store
 }
 
 type progress struct {
@@ -96,8 +100,18 @@ func openTarget(ctx context.Context, cfg serverconfig.Syncer) (*target, error) {
 		pool.Close()
 		return nil, err
 	}
+	if cfg.FileStorage.Backend != "" {
+		t.files, err = filestore.Open(cfg.FileStorage)
+		if err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("open file storage: %w", err)
+		}
+	}
 	for _, table := range cfg.Tables {
 		if _, err := t.columnTypes(ctx, table.Name); err != nil {
+			if t.files != nil {
+				_ = t.files.Close()
+			}
 			pool.Close()
 			return nil, err
 		}
@@ -105,7 +119,12 @@ func openTarget(ctx context.Context, cfg serverconfig.Syncer) (*target, error) {
 	return t, nil
 }
 
-func (t *target) Close() { t.pool.Close() }
+func (t *target) Close() {
+	if t.files != nil {
+		_ = t.files.Close()
+	}
+	t.pool.Close()
+}
 
 func quote(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
 
@@ -243,6 +262,11 @@ func (t *target) store(ctx context.Context, beginner transactionBeginner, messag
 	if message.Seq != current.Received+1 {
 		return fmt.Errorf("non-contiguous message: got %d, want %d", message.Seq, current.Received+1)
 	}
+	if strings.HasPrefix(message.Kind, "file_") {
+		if err := t.validateFileMessage(message); err != nil {
+			return err
+		}
+	}
 	if message.Kind == "schema" && phase == "stream" {
 		if message.SchemaVersion == "" {
 			return errors.New("stream schema refresh requires schema_version")
@@ -278,6 +302,23 @@ func (t *target) store(ctx context.Context, beginner transactionBeginner, messag
 		if message.Transaction == "" || openTransaction != message.Transaction {
 			return fmt.Errorf("transaction_end %q does not match open transaction %q", message.Transaction, openTransaction)
 		}
+	case "file_begin", "file_chunk":
+		if message.Transaction == "" || message.File == nil {
+			return errors.New("file batch requires a transaction and file payload")
+		}
+		if openTransaction == "" {
+			openTransaction = message.Transaction
+		} else if openTransaction != message.Transaction {
+			return fmt.Errorf("transaction %q is still open", openTransaction)
+		}
+	case "file_end":
+		if message.Transaction == "" || message.File == nil || openTransaction != message.Transaction {
+			return errors.New("file_end does not match the open file batch")
+		}
+	case "file_delete":
+		if message.File == nil || openTransaction != "" {
+			return errors.New("file_delete requires a payload and no open batch")
+		}
 	case "schema":
 		if openTransaction != "" {
 			return errors.New("schema cannot be applied inside a transaction")
@@ -286,7 +327,7 @@ func (t *target) store(ctx context.Context, beginner transactionBeginner, messag
 	if err := t.applyMessage(ctx, tx, message, raw, &phase); err != nil {
 		return err
 	}
-	if message.Kind == "transaction_end" {
+	if message.Kind == "transaction_end" || message.Kind == "file_end" {
 		openTransaction = ""
 	}
 	if message.Kind == "schema_end" {
@@ -297,7 +338,7 @@ func (t *target) store(ctx context.Context, beginner transactionBeginner, messag
 		return err
 	}
 	applied := current.Applied
-	if message.Kind == "snapshot_end" || message.Kind == "transaction_end" || message.Kind == "schema_end" {
+	if message.Kind == "snapshot_end" || message.Kind == "transaction_end" || message.Kind == "schema_end" || message.Kind == "file_end" || message.Kind == "file_delete" {
 		applied = message.Seq
 	}
 	if _, err := tx.Exec(ctx, "UPDATE "+meta+".sync_state SET generation=$2, received_seq=$3, applied_seq=$4, phase=$5, open_transaction=$6, schema_version=$7, pending_schema_version=$8, updated_at=clock_timestamp() WHERE syncer_id=$1",
@@ -309,6 +350,37 @@ func (t *target) store(ctx context.Context, beginner transactionBeginner, messag
 		t.invalidateTypes()
 	}
 	return err
+}
+
+func (t *target) validateFileMessage(message event.Message) error {
+	if t.files == nil || message.File == nil || message.File.Path == "" || !filepath.IsLocal(filepath.FromSlash(message.File.Path)) || strings.ContainsRune(message.File.Path, 0) {
+		return errors.New("file event has an invalid or unconfigured path")
+	}
+	file := message.File
+	switch message.Kind {
+	case "file_delete":
+		if file.Operation != "delete" || message.Transaction != "" || file.Data != "" {
+			return errors.New("invalid file_delete envelope")
+		}
+		return nil
+	case "file_begin", "file_chunk", "file_end":
+		if file.Operation != "create" && file.Operation != "update" {
+			return errors.New("file batch operation must be create or update")
+		}
+		if message.Transaction == "" || file.Size < 0 || file.Size > t.cfg.FileStorage.MaxFileBytes || file.Chunks == 0 {
+			return errors.New("file batch metadata exceeds configured limits")
+		}
+		digest, err := hex.DecodeString(file.SHA256)
+		if err != nil || len(digest) != sha256.Size {
+			return errors.New("file batch SHA-256 is invalid")
+		}
+		if message.Kind != "file_chunk" && file.Data != "" {
+			return errors.New("file content is only allowed in file_chunk")
+		}
+		return nil
+	default:
+		return errors.New("unsupported file message")
+	}
 }
 
 func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Message, raw []byte, phase *string) error {
@@ -500,10 +572,117 @@ func (t *target) applyMessage(ctx context.Context, tx pgx.Tx, message event.Mess
 				break
 			}
 		}
+	case "file_begin", "file_chunk":
+		if *phase != "stream" || t.files == nil {
+			return errors.New("file event received before snapshot or without file storage")
+		}
+		_, err := tx.Exec(ctx, "INSERT INTO "+meta+".inbox(syncer_id,generation,seq,message_id,payload) VALUES($1,$2,$3,$4,$5)",
+			t.cfg.ID, message.Generation, int64(message.Seq), message.ID, raw)
+		return err
+	case "file_end":
+		if *phase != "stream" || t.files == nil {
+			return errors.New("file_end received before snapshot or without file storage")
+		}
+		if err := t.applyFile(ctx, tx, message); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, "DELETE FROM "+meta+".inbox WHERE syncer_id=$1 AND generation=$2", t.cfg.ID, message.Generation)
+		return err
+	case "file_delete":
+		if *phase != "stream" || t.files == nil || message.File.Operation != "delete" {
+			return errors.New("invalid file_delete event")
+		}
+		if !t.cfg.AllowsFileOperation("delete") {
+			return nil
+		}
+		return t.files.Delete(ctx, message.File.Path)
 	default:
 		return fmt.Errorf("unsupported message kind %q", message.Kind)
 	}
 	return nil
+}
+
+func (t *target) applyFile(ctx context.Context, tx pgx.Tx, end event.Message) (result error) {
+	if end.File.Operation != "create" && end.File.Operation != "update" {
+		return errors.New("file_end operation must be create or update")
+	}
+	if end.File.Size < 0 || end.File.Size > t.cfg.FileStorage.MaxFileBytes || end.File.SHA256 == "" || end.File.Chunks == 0 {
+		return errors.New("file metadata exceeds configured limits")
+	}
+	temporary, err := os.CreateTemp("", ".go-sync-file-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = temporary.Close()
+		if err := os.Remove(temporary.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, err)
+		}
+	}()
+	hash := sha256.New()
+	written := int64(0)
+	expectedChunk := uint32(0)
+	rows, err := tx.Query(ctx, "SELECT payload FROM "+quote(t.cfg.Postgres.MetadataSchema)+".inbox WHERE syncer_id=$1 AND generation=$2 ORDER BY seq", t.cfg.ID, end.Generation)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seenBegin := false
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return err
+		}
+		var message event.Message
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return err
+		}
+		if message.Transaction != end.Transaction || message.File == nil || message.File.Path != end.File.Path || message.File.Operation != end.File.Operation || message.File.Size != end.File.Size || message.File.SHA256 != end.File.SHA256 || message.File.Chunks != end.File.Chunks {
+			return errors.New("file batch metadata is inconsistent")
+		}
+		switch message.Kind {
+		case "file_begin":
+			if seenBegin || expectedChunk != 0 {
+				return errors.New("file batch has duplicate begin")
+			}
+			seenBegin = true
+		case "file_chunk":
+			if !seenBegin || message.File.Chunk != expectedChunk || expectedChunk >= end.File.Chunks {
+				return errors.New("file chunks are not contiguous")
+			}
+			decoded, err := base64.StdEncoding.DecodeString(message.File.Data)
+			if err != nil {
+				return errors.New("file chunk is not valid base64")
+			}
+			if int64(len(decoded))+written > t.cfg.FileStorage.MaxFileBytes {
+				return errors.New("file content exceeds configured limit")
+			}
+			if _, err := temporary.Write(decoded); err != nil {
+				return err
+			}
+			_, _ = hash.Write(decoded)
+			written += int64(len(decoded))
+			expectedChunk++
+		default:
+			return errors.New("unexpected message in file batch")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !seenBegin || expectedChunk != end.File.Chunks || written != end.File.Size || hex.EncodeToString(hash.Sum(nil)) != end.File.SHA256 {
+		return errors.New("file size, chunk count or SHA-256 does not match")
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if !t.cfg.AllowsFileOperation(end.File.Operation) {
+		return nil
+	}
+	return t.files.Put(ctx, end.File.Path, temporary.Name(), os.FileMode(end.File.Mode), time.Unix(0, end.File.ModTimeUnixNano))
 }
 
 type appliedColumn struct {

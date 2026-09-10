@@ -59,6 +59,18 @@ type Replay struct {
 	MaxBytes int64  `json:"max_bytes,omitempty"`
 }
 
+// FileWatch configures a recursively scanned filesystem source. fsnotify is
+// used only to reduce latency; every scan remains authoritative after downtime.
+type FileWatch struct {
+	RootDir      string   `json:"root_dir"`
+	ScanInterval string   `json:"scan_interval,omitempty"`
+	Include      []string `json:"include,omitempty"`
+	Exclude      []string `json:"exclude,omitempty"`
+	Events       []string `json:"events,omitempty"`
+	MaxFileBytes int64    `json:"max_file_bytes,omitempty"`
+	ChunkBytes   int      `json:"chunk_bytes,omitempty"`
+}
+
 func (t Table) String() string { return t.Schema + "." + t.Name }
 
 type Config struct {
@@ -69,6 +81,7 @@ type Config struct {
 	SQLServer           SQLServer         `json:"sqlserver,omitempty"`
 	SQLServerLegacy     SQLServerLegacy   `json:"sqlserver_legacy,omitempty"`
 	MySQL               MySQL             `json:"mysql,omitempty"`
+	FileWatch           FileWatch         `json:"file_watch,omitempty"`
 	SourceID            string            `json:"source_id"`
 	DSN                 string            `json:"dsn"`
 	Slot                string            `json:"slot"`
@@ -96,6 +109,7 @@ func Defaults() Config {
 		SQLServer:       SQLServer{PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h", FenceTimeout: "2m"},
 		SQLServerLegacy: SQLServerLegacy{AutoInstall: true, Owner: "dbo", Prefix: "go_sync_legacy", PollInterval: "1s", QueryTimeout: "5m", SnapshotTimeout: "1h"},
 		MySQL:           MySQL{ServerID: 100001, ConnectTimeout: "30s", SnapshotTimeout: "1h"},
+		FileWatch:       FileWatch{ScanInterval: "5s", Events: []string{"create", "update", "delete"}, MaxFileBytes: 1 << 30, ChunkBytes: 4 << 20},
 		Log:             Log{Level: "info", MaxSizeMB: 100, MaxBackups: 10, MaxAgeDays: 30, Compress: true},
 		BatchRows:       500, BatchBytes: 1 << 20, MaxRowBytes: 16 << 20,
 		HTTPTimeout: "30s", RetryMin: "1s", RetryMax: "60s",
@@ -127,8 +141,8 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if c.Engine() != "postgres" && c.Engine() != "sqlserver" && c.Engine() != "sqlserver_legacy" && c.Engine() != "mysql" {
-		return errors.New("source_type must be postgres, sqlserver, sqlserver_legacy or mysql")
+	if c.Engine() != "postgres" && c.Engine() != "sqlserver" && c.Engine() != "sqlserver_legacy" && c.Engine() != "mysql" && c.Engine() != "files" {
+		return errors.New("source_type must be postgres, sqlserver, sqlserver_legacy, mysql or files")
 	}
 	if c.Engine() == "sqlserver" {
 		if err := c.SQLServer.validate(c.Tables); err != nil {
@@ -145,6 +159,11 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	if c.Engine() == "files" {
+		if err := c.FileWatch.validate(c.DataDir, c.MaxRowBytes); err != nil {
+			return err
+		}
+	}
 	if strings.ContainsRune(c.PostgresBinDir, 0) {
 		return errors.New("postgres_bin_dir must not contain nul")
 	}
@@ -158,8 +177,8 @@ func (c Config) Validate() error {
 			return errors.New("metrics_addr must be host:port with a numeric port between 1 and 65535")
 		}
 	}
-	if c.SourceID == "" || c.DSN == "" || c.DataDir == "" {
-		return errors.New("source_id, dsn and data_dir are required")
+	if c.SourceID == "" || c.DataDir == "" || (c.Engine() != "files" && c.DSN == "") {
+		return errors.New("source_id, data_dir and (for database sources) dsn are required")
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`).MatchString(c.SourceID) {
 		return errors.New("source_id must contain 1–128 ascii letters, digits, dots, underscores or hyphens")
@@ -182,7 +201,7 @@ func (c Config) Validate() error {
 	} else {
 		return errors.New("transport must be http or grpc")
 	}
-	if len(c.Tables) == 0 {
+	if c.Engine() != "files" && len(c.Tables) == 0 {
 		return errors.New("tables must not be empty")
 	}
 	seen := map[Table]bool{}
@@ -243,6 +262,66 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func (f FileWatch) validate(dataDir string, maxRowBytes int) error {
+	if !filepath.IsAbs(f.RootDir) || strings.ContainsRune(f.RootDir, 0) {
+		return errors.New("file_watch.root_dir must be an absolute path without nul")
+	}
+	if duration, err := time.ParseDuration(f.ScanInterval); err != nil || duration < time.Second {
+		return errors.New("file_watch.scan_interval must be at least 1s")
+	}
+	maxChunkBytes := (maxRowBytes - 64<<10) * 3 / 4
+	if f.ChunkBytes < 64<<10 || f.ChunkBytes > maxChunkBytes {
+		return errors.New("file_watch.chunk_bytes must be at least 64 KiB and leave room for base64 below max_row_bytes")
+	}
+	if f.MaxFileBytes < int64(f.ChunkBytes) {
+		return errors.New("file_watch.max_file_bytes must be at least chunk_bytes")
+	}
+	if f.MaxFileBytes > 1<<40 {
+		return errors.New("file_watch.max_file_bytes must not exceed 1 TiB")
+	}
+	for _, pattern := range append(slices.Clone(f.Include), f.Exclude...) {
+		if pattern == "" || strings.ContainsRune(pattern, 0) {
+			return errors.New("file_watch patterns must be nonempty and contain no nul")
+		}
+		if _, err := filepath.Match(pattern, "probe"); err != nil {
+			return fmt.Errorf("invalid file_watch pattern %q", pattern)
+		}
+	}
+	seenEvents := make(map[string]bool, len(f.Events))
+	for _, event := range f.Events {
+		if event != "create" && event != "update" && event != "delete" {
+			return errors.New("file_watch.events may contain only create, update and delete")
+		}
+		if seenEvents[event] {
+			return errors.New("file_watch.events must be unique")
+		}
+		seenEvents[event] = true
+	}
+	if len(seenEvents) == 0 {
+		return errors.New("file_watch.events must not be empty")
+	}
+	root, err := filepath.Abs(f.RootDir)
+	if err != nil {
+		return err
+	}
+	data, err := filepath.Abs(dataDir)
+	if err != nil {
+		return err
+	}
+	if pathsOverlap(root, data) {
+		return errors.New("file_watch.root_dir and data_dir must not overlap")
+	}
+	return nil
+}
+
+func pathsOverlap(a, b string) bool {
+	contains := func(parent, child string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	return contains(a, b) || contains(b, a)
+}
+
 func (l Log) validate() error {
 	if strings.ContainsRune(l.File, 0) {
 		return errors.New("log.file must not contain nul")
@@ -287,6 +366,12 @@ func (c Config) Fingerprint() string {
 			ServerID uint32
 			Tables   []Table
 		}{Engine: c.Engine(), Source: c.SourceID, ServerID: c.MySQL.ServerID, Tables: tables})
+	}
+	if c.Engine() == "files" {
+		b, _ = json.Marshal(struct {
+			Engine, Source string
+			Watch          FileWatch
+		}{c.Engine(), c.SourceID, c.FileWatch})
 	}
 	if len(c.FileColumns) != 0 {
 		fileColumns := slices.Clone(c.FileColumns)

@@ -12,6 +12,7 @@ import (
 	"go-sync/internal/capture"
 	"go-sync/internal/config"
 	"go-sync/internal/delivery"
+	"go-sync/internal/filewatch"
 	mysqlsource "go-sync/internal/mysql"
 	"go-sync/internal/queue"
 	"go-sync/internal/sqlserver"
@@ -77,7 +78,9 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 		g.Go(func() error { return metricsServer.Run(groupCtx) })
 	}
 	g.Go(func() error {
-		if c.Engine() == "sqlserver" {
+		if c.Engine() == "files" {
+			return filewatch.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+		} else if c.Engine() == "sqlserver" {
 			return sqlserver.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
 		} else if c.Engine() == "sqlserver_legacy" {
 			return sqlserverlegacy.New(c, q, log).WithMetrics(metrics).Run(groupCtx)

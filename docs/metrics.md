@@ -27,6 +27,7 @@
 | `capture_errors_total` / `capture_reconnects_total` | Counter | 失败尝试 / 计划重试次数；关闭取消不算失败，首次连接失败也可产生重试 |
 | `capture_snapshots_total` / `capture_snapshot_rows_total` | Counter | 成功完整落盘并发布的快照 / 其中行数；失败的快照不计入 |
 | `capture_transactions_total` / `capture_transaction_rows_total` | Counter | 原子发布到本地队列的增量事务 / 行数；尚未提交及已持久化重放不重复计数 |
+| `file_events_total{operation}` / `file_content_bytes_total` | Counter | 已原子发布到本地队列的文件 create/update/delete 数量 / create、update 原始内容字节数；不含 Base64 膨胀和重传 |
 | `capture_wal_payload_bytes_total` | Counter | 收到的逻辑复制 payload 字节，包含重放；不是物理 WAL 量 |
 | `capture_last_receive_timestamp_seconds` | Gauge | 最近有效复制帧（包括心跳）的接收时间；未收到为 0 |
 | `capture_last_commit_timestamp_seconds` | Gauge | 最近快照或增量事务本地发布的时间；未发布为 0 |
@@ -74,7 +75,7 @@
 
 正常空闲时 `last_commit` 和 `last_ack` 不更新；仅凭距上次提交/ACK 的时长不能判断故障。WAL Gauge 应结合采样时间、连接状态和积压判断，不能把初始的 0 当成已经追平。使用 SQL 中的 LSN 差值避免先将绝对 LSN 转为 float64 后相减；巨大差值作为 Prometheus 样本仍受浮点数精度限制。
 
-当前 schema 漂移仍会导致进程停止。致命错误计数可能来不及被下一次抓取观察到，因此必须同时监控 `up` 和退出日志。自动 schema 全量重推、按历史结构适配增量的功能尚未实现。
+无法安全适配的 schema 漂移仍会导致进程停止。致命错误计数可能来不及被下一次抓取观察到，因此必须同时监控 `up` 和退出日志。标准 gRPC 下 PostgreSQL 与 MySQL 可通过完整 schema 屏障适配受支持的变化。
 
 ## PromQL 示例
 

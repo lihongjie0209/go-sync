@@ -16,6 +16,7 @@ import (
 	"go-sync/internal/app"
 	"go-sync/internal/capture"
 	"go-sync/internal/config"
+	"go-sync/internal/filewatch"
 	"go-sync/internal/logging"
 	mysqlsource "go-sync/internal/mysql"
 	"go-sync/internal/sqlserver"
@@ -76,6 +77,8 @@ func execute(ctx context.Context, args []string, out, errOut io.Writer) int {
 			info, err = sqlserverlegacy.Inspect(checkCtx, c)
 		} else if c.Engine() == "mysql" {
 			info, err = mysqlsource.Inspect(checkCtx, c)
+		} else if c.Engine() == "files" {
+			info, err = filewatch.Inspect(checkCtx, c)
 		} else {
 			info, err = capture.Inspect(checkCtx, c)
 		}

@@ -90,6 +90,32 @@ periodically written to VictoriaMetrics through its
 held while VictoriaMetrics is unavailable, so observability failures never
 consume the durable change queue. Local `/metrics` endpoints remain available.
 
+## Filesystem replication
+
+Set collector `source_type` to `files` and configure `file_watch`. The collector
+recursively scans the root after every restart and at `scan_interval`; fsnotify
+only accelerates scans, so changes missed while offline are recovered. Regular
+files are split into durable Base64 messages and checked with SHA-256. Symlinks
+are skipped, reads are confined with `os.Root`, and `data_dir` must not overlap
+the watched root. `events` accepts `create`, `update`, and `delete`; initial files
+count as creates, and rename is represented as delete plus create.
+
+Each server syncer may configure `file_storage.backend` as `directory`, `s3`, or
+`oss`. Directory writes use a confined root and a temporary file before rename.
+S3 uses an S3-compatible endpoint and OSS uses the native Alibaba OSS client.
+PostgreSQL in the same syncer config stores the durable receive checkpoint even
+for a file-only syncer, so `tables` may be empty when file storage is configured.
+Overlapping directory or object prefixes across syncers are rejected.
+Use a separate `syncer_id` and server syncer entry for each database collector
+and each filesystem collector; one ID permits only one active collector stream.
+
+The server has its own `file_storage.events` filter. A filtered event is still
+validated, checkpointed, and acknowledged, but is not applied. Thus
+`["create", "update"]` retains files after source deletion. Both sides default
+to all operations. Keep `max_file_bytes` aligned on both sides; `chunk_bytes`
+must fit the message limit after Base64 expansion. See
+`config.files.example.json` and `server.config.example.json`.
+
 ## Hot reload
 
 The server watches the configuration file and also exposes the authenticated

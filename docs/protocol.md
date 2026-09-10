@@ -65,6 +65,10 @@ transaction_end
 | `snapshot_begin` | 新快照开始；`tables` 为 `[{"schema":"public","name":"items"}]` 白名单，`lsn` 为快照对应的增量起点 |
 | `schema` | `schema` 对象描述一张表；和本次快照一起暂存 |
 | `schema_end` | 在线结构刷新完整结束；接收端原子验证并激活新的 `schema_version` |
+| `file_begin` | 文件新建或修改开始，包含相对路径、大小、mtime、权限、分块数和 SHA-256 |
+| `file_chunk` | Base64 文件分块；同一 `transaction` 内 chunk 从 0 连续递增 |
+| `file_end` | 文件提交；服务端校验大小、分块数和 SHA-256 后才替换目标 |
+| `file_delete` | 删除相对路径对应的目标对象；客户端或服务端均可过滤 |
 | `snapshot_rows` | `operation=read`；完整行，按主键进入本次快照暂存区 |
 | `snapshot_end` | 完整快照结束；原子发布该代次副本，替换白名单范围的旧基线 |
 | `transaction_rows` | 已提交源事务的一部分；暂存到 `transaction` 对应的事务中 |
@@ -112,6 +116,8 @@ INSERT/read 包含完整行；UPDATE 是补丁，使用 old_key 定位旧行，�
 列数组保留源列顺序。OID 只标识源库对象，不可直接作为目标库 OID 使用。
 
 `schema_version` 是采集端持久化的完整结构 hash。快照中的所有消息使用同一版本。标准 gRPC 在线刷新先发送每张配置表的完整 `schema`，再发送同版本的 `schema_end`；后续增量才允许使用新版本。PostgreSQL 在 WAL 解码首次发现行结构与持久结构不匹配时触发该屏障，并从原 durable LSN 重放；连续跨越多个不兼容 DDL 边界时会安全停止并要求重新初始化。HTTP 模式维持原有消息类型序列，旧接收端可以忽略新增 JSON 字段；标准服务端会持久化 pending/active 版本并拒绝跨版本或未完成屏障的行消息。
+
+文件事件同样使用普通 JSON 消息，因此 HTTP 接收端可按上述 kind 处理，标准服务端通过 gRPC 接收。文件只有在 `file_end` 校验和存储成功后才推进 applied checkpoint。丢失 ACK 会重发相同序列，目标按完整对象覆盖，保持至少一次语义且不会暴露半文件。
 
 ## 错误与上限
 

@@ -11,7 +11,8 @@ go test -race -shuffle=on ./...
 Database recovery tests use Testcontainers and always register container
 cleanup with the test process. They cover PostgreSQL target restart recovery,
 duplicate delivery after a lost ACK, atomic transaction rollback, interrupted
-snapshot publication, PostgreSQL capture, SQL Server CDC and MySQL 5.6/5.7:
+snapshot publication, PostgreSQL capture, SQL Server CDC, MySQL 5.6/5.7,
+filesystem commit/filtering and S3 object storage:
 
 ```bash
 go test -race -count=1 -timeout=55m -tags=integration ./...

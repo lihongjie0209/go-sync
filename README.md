@@ -1,6 +1,6 @@
 # go-sync
 
-Go 编写的数据同步系统：采集端支持 PostgreSQL 逻辑 slot、SQL Server CDC/legacy outbox、MySQL ROW binlog、全量、本地持久队列以及 HTTP/gRPC 至少一次投递；标准 `go-sync-server` 将数据事务性写入预创建的 PostgreSQL 15+ 表。
+Go 编写的数据同步系统：采集端支持 PostgreSQL 逻辑 slot、SQL Server CDC/legacy outbox、MySQL ROW binlog、递归文件监听与全量补扫、本地持久队列以及 HTTP/gRPC 至少一次投递；标准 `go-sync-server` 将数据事务性写入预创建的 PostgreSQL 15+ 表，并可将独立文件保存到目录、S3 或阿里云 OSS。
 
 标准服务端、TLS、同步器 ID、目标映射、热更新和 VictoriaMetrics 配置见 [gRPC 标准服务端](docs/server.md)、`server.config.example.json` 和 `config.grpc.example.json`。
 
@@ -123,6 +123,8 @@ curl http://127.0.0.1:9108/metrics
 覆盖采集事务/行数、连接重试、WAL 保留与字节积压、队列已发布/暂存消息、磁盘余量、HTTP 耗时/重试/无效 ACK、确认投递量、schema 漂移及 Go/进程指标。Counter 在进程重启时归零，队列 Gauge 从磁盘恢复；成功 HTTP 请求和本地确认投递分别计数。
 
 完整指标口径、PromQL、抓取配置和告警示例见 [docs/metrics.md](docs/metrics.md)。标准服务端支持 schema 版本屏障，并可选择自动增加安全的可空非主键字段。使用标准 gRPC 时，MySQL 5.6/5.7 和 PostgreSQL 能在线重推完整 schema 后继续增量；SQL Server CDC 和 SQL Server 2000 当前检测到源端 DDL 变化后仍会停止并要求重新初始化。
+
+文件同步可使用 `source_type: "files"`：采集端通过 fsnotify 加速并定期递归补扫，支持新建、修改、删除事件过滤、分块和 SHA-256 校验，经现有 HTTP 或 gRPC 可靠队列上报。标准服务端可保存到本地目录、S3 或阿里云 OSS，并可独立忽略删除等事件。示例见 [config.files.example.json](config.files.example.json) 和 [docs/server.md](docs/server.md#filesystem-replication)。
 
 ## 测试
 
