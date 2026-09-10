@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"go-sync/internal/event"
 )
@@ -24,6 +25,45 @@ func openTest(t *testing.T) *Store {
 		t.Fatal(e)
 	}
 	return q
+}
+
+func TestAcknowledgedMessagesRemainReplayableAndAreBounded(t *testing.T) {
+	q := openTest(t)
+	q.ConfigureReplay(time.Hour, 1<<20)
+	if err := q.Append(event.Message{Kind: "snapshot_end"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Publish("0/1", true); err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := q.Peek()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Ack(message.Seq, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	replayed, _, err := q.Get(1)
+	if err != nil || replayed.ID != message.ID {
+		t.Fatalf("acknowledged message is not replayable: %+v %v", replayed, err)
+	}
+	q.ConfigureReplay(time.Nanosecond, 1)
+	if err := q.Append(event.Message{Kind: "transaction_end"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Publish("0/2", false); err != nil {
+		t.Fatal(err)
+	}
+	message, _, err = q.Peek()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Ack(message.Seq, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := q.Get(1); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("expired replay retained: %v", err)
+	}
 }
 
 func TestPublishAndRecovery(t *testing.T) {

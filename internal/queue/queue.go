@@ -39,13 +39,17 @@ type State struct {
 	ReadySeq        uint64 `json:"ready_seq"`
 	DeliveredSeq    uint64 `json:"delivered_seq"`
 	Bytes           int64  `json:"bytes"`
+	EarliestSeq     uint64 `json:"earliest_seq,omitempty"`
+	ArchiveBytes    int64  `json:"archive_bytes,omitempty"`
 }
 
 type Store struct {
-	db       *bolt.DB
-	maxBytes int64
-	reserve  uint64
-	dir      string
+	db          *bolt.DB
+	maxBytes    int64
+	reserve     uint64
+	dir         string
+	replayAge   time.Duration
+	replayBytes int64
 }
 
 func Open(dir string, maxBytes int64, reserve uint64) (*Store, error) {
@@ -56,7 +60,7 @@ func Open(dir string, maxBytes int64, reserve uint64) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open queue (another collector may hold the lock): %w", err)
 	}
-	s := &Store{db: db, maxBytes: maxBytes, reserve: reserve, dir: dir}
+	s := &Store{db: db, maxBytes: maxBytes, reserve: reserve, dir: dir, replayAge: 7 * 24 * time.Hour, replayBytes: 20 << 30}
 	err = db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{metaBucket, itemsBucket} {
 			if _, e := tx.CreateBucketIfNotExists(b); e != nil {
@@ -80,7 +84,13 @@ func Open(dir string, maxBytes int64, reserve uint64) (*Store, error) {
 	return s, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
-func key(n uint64) []byte     { b := make([]byte, 8); binary.BigEndian.PutUint64(b, n); return b }
+
+// ConfigureReplay sets retention for acknowledged messages. It does not affect
+// unacknowledged queue capacity and never evicts an undelivered message.
+func (s *Store) ConfigureReplay(maxAge time.Duration, maxBytes int64) {
+	s.replayAge, s.replayBytes = maxAge, maxBytes
+}
+func key(n uint64) []byte { b := make([]byte, 8); binary.BigEndian.PutUint64(b, n); return b }
 func read(tx *bolt.Tx) (State, error) {
 	var st State
 	err := json.Unmarshal(tx.Bucket(metaBucket).Get(stateKey), &st)
@@ -146,6 +156,8 @@ func (s *Store) Initialize(st State) error {
 		st.NextSeq = 0
 		st.ReadySeq = 0
 		st.DeliveredSeq = 0
+		st.EarliestSeq = 1
+		st.ArchiveBytes = 0
 		return save(tx, st)
 	})
 }
@@ -337,6 +349,47 @@ func (s *Store) Peek() (event.Message, []byte, error) {
 	})
 	return m, b, err
 }
+
+// Get returns a published message by sequence, including acknowledged history.
+func (s *Store) Get(seq uint64) (event.Message, []byte, error) {
+	var m event.Message
+	var raw []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		st, err := read(tx)
+		if err != nil {
+			return err
+		}
+		earliest := st.EarliestSeq
+		if earliest == 0 {
+			earliest = st.DeliveredSeq + 1
+		}
+		if seq < earliest || seq > st.ReadySeq {
+			return ErrEmpty
+		}
+		value := tx.Bucket(itemsBucket).Get(key(seq))
+		if value == nil {
+			return errors.New("queue gap")
+		}
+		raw = append([]byte(nil), value...)
+		return json.Unmarshal(raw, &m)
+	})
+	return m, raw, err
+}
+
+func (s *Store) Bounds() (generation string, earliest, ready uint64, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		st, e := read(tx)
+		if e != nil {
+			return e
+		}
+		generation, earliest, ready = st.Generation, st.EarliestSeq, st.ReadySeq
+		if earliest == 0 {
+			earliest = st.DeliveredSeq + 1
+		}
+		return nil
+	})
+	return
+}
 func (s *Store) Ack(seq uint64, id string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		st, e := read(tx)
@@ -359,9 +412,34 @@ func (s *Store) Ack(seq uint64, id string) error {
 			return errors.New("ack id mismatch")
 		}
 		st.Bytes -= int64(len(v))
+		st.ArchiveBytes += int64(len(v))
 		st.DeliveredSeq = seq
-		if e := b.Delete(key(seq)); e != nil {
-			return e
+		if st.EarliestSeq == 0 {
+			st.EarliestSeq = 1
+		}
+		for st.EarliestSeq <= st.DeliveredSeq {
+			old := b.Get(key(st.EarliestSeq))
+			if old == nil {
+				st.EarliestSeq++
+				continue
+			}
+			expired := false
+			var header struct {
+				CreatedAt string `json:"created_at"`
+			}
+			if json.Unmarshal(old, &header) == nil {
+				if created, err := time.Parse(time.RFC3339Nano, header.CreatedAt); err == nil {
+					expired = time.Since(created) > s.replayAge
+				}
+			}
+			if !expired && st.ArchiveBytes <= s.replayBytes {
+				break
+			}
+			st.ArchiveBytes -= int64(len(old))
+			if e := b.Delete(key(st.EarliestSeq)); e != nil {
+				return e
+			}
+			st.EarliestSeq++
 		}
 		return save(tx, st)
 	})

@@ -3,6 +3,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/expfmt"
 	"go-sync/internal/config"
 	"go-sync/internal/queue"
 )
@@ -185,6 +187,31 @@ func (m *Metrics) LegacyPoll(elapsed time.Duration, progress bool, err error, ca
 
 func (m *Metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) { m.handler.ServeHTTP(w, r) }
 
+// GatherText returns a point-in-time Prometheus text snapshot for forwarding
+// through the standard gRPC server. Local /metrics remains available.
+func (m *Metrics) GatherText() ([]byte, error) {
+	if m == nil {
+		return nil, nil
+	}
+	families, err := m.registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	encoder := expfmt.NewEncoder(&out, expfmt.NewFormat(expfmt.TypeTextPlain))
+	for _, family := range families {
+		if err := encoder.Encode(family); err != nil {
+			return nil, err
+		}
+	}
+	if closer, ok := encoder.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out.Bytes(), nil
+}
+
 // CDCPoll observes SQL Server polling without treating its LSN as WAL bytes.
 func (m *Metrics) CDCPoll(elapsed time.Duration, success, retentionGap bool) {
 	if m == nil {
@@ -331,6 +358,8 @@ func newQueueCollector(q *queue.Store, c config.Config) *queueCollector {
 		{"disk_free_bytes", "Available bytes on the queue filesystem."},
 		{"disk_reserve_bytes", "Configured minimum free disk reserve."},
 		{"queue_oldest_pending_age_seconds", "Enqueue age of the oldest published unacknowledged message; zero if empty."},
+		{"replay_archive_bytes", "Serialized bytes retained after acknowledgement for server-requested replay."},
+		{"replay_earliest_sequence", "Earliest sequence still available for replay."},
 	} {
 		x.desc = append(x.desc, prometheus.NewDesc("go_sync_"+metric[0], metric[1], nil, nil))
 	}
@@ -360,7 +389,7 @@ func (x *queueCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	// Alert: go_sync_queue_bytes / go_sync_queue_limit_bytes > 0.8
 	// Alert: go_sync_queue_oldest_pending_age_seconds > 300
-	values := []float64{float64(st.Bytes), float64(x.c.QueueBytes), float64(st.ReadySeq - st.DeliveredSeq), float64(st.NextSeq - st.ReadySeq), float64(free), float64(x.c.ReserveBytes), age}
+	values := []float64{float64(st.Bytes), float64(x.c.QueueBytes), float64(st.ReadySeq - st.DeliveredSeq), float64(st.NextSeq - st.ReadySeq), float64(free), float64(x.c.ReserveBytes), age, float64(st.ArchiveBytes), float64(st.EarliestSeq)}
 	for i, value := range values {
 		ch <- prometheus.MustNewConstMetric(x.desc[i], prometheus.GaugeValue, value)
 	}
@@ -369,6 +398,6 @@ func (x *queueCollector) Collect(ch chan<- prometheus.Metric) {
 		phase = "uninitialized"
 	}
 	for _, label := range []string{"uninitialized", "snapshot", "stream"} {
-		ch <- prometheus.MustNewConstMetric(x.desc[7], prometheus.GaugeValue, bit(phase == label), label)
+		ch <- prometheus.MustNewConstMetric(x.desc[9], prometheus.GaugeValue, bit(phase == label), label)
 	}
 }

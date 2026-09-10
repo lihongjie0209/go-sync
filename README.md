@@ -1,6 +1,8 @@
 # go-sync
 
-Go 编写的变化采集端：PostgreSQL 逻辑 slot、SQL Server CDC、全量、本地持久队列和 HTTP 至少一次投递。只提供采集端，不包含业务接收服务器。
+Go 编写的数据同步系统：采集端支持 PostgreSQL 逻辑 slot、SQL Server CDC/legacy outbox、MySQL ROW binlog、全量、本地持久队列以及 HTTP/gRPC 至少一次投递；标准 `go-sync-server` 将数据事务性写入预创建的 PostgreSQL 15+ 表。
+
+标准服务端、TLS、同步器 ID、目标映射、热更新和 VictoriaMetrics 配置见 [gRPC 标准服务端](docs/server.md)、`server.config.example.json` 和 `config.grpc.example.json`。
 
 SQL Server 接入及配置见 [SQL Server 全量与 CDC](docs/sqlserver.md) 和 `config.sqlserver.example.json`。SQL Server 2008/2008 R2 仍需真实旧引擎验收；首次全量表锁必须显式开启。以下原有配置说明默认针对 PostgreSQL。
 
@@ -14,7 +16,7 @@ Windows 发布包支持原生 Service 安装、卸载、启动、停止和状态
 
 ## 发布包
 
-推送 `v*` 标签会由 GoReleaser 创建 GitHub Release，发布 Windows x64 与 x86 ZIP 和统一的 SHA-256 `checksums.txt`。每个 ZIP 包含可执行文件、PostgreSQL/SQL Server 配置示例及 `docs` 文档；版本号通过构建参数写入 `go-sync version`。
+推送 `v*` 标签会由 GoReleaser 创建 GitHub Release：采集器发布 Windows x64/x86，服务端发布 Windows x64/x86 与 Linux x64，并生成统一的 SHA-256 `checksums.txt`。
 
 普通 push 和 pull request 会运行竞态测试、`go vet`、模块一致性检查、Testcontainers 集成测试，并生成保留 7 天的 Windows 快照包。正式发布示例：
 
@@ -72,14 +74,14 @@ max_wal_senders = 10
 ```text
 源库事务 → 本地暂存块 → 原子发布完整事务及 durable_lsn → 确认 slot
                                        ↓
-                                HTTP 有序发送
+                             HTTP 或 gRPC 有序发送
                                        ↓
-                         持久化 ACK → delivered_seq → 回收
+                       持久化 ACK → delivered_seq → 重放归档
 ```
 
 - 队列采用 bbolt 同步落盘，事件发布与 `durable_lsn` 更新在同一事务提交，禁止 `NoSync`。
 - 每个源只允许一个采集进程；队列文件锁防止同一持久目录并发打开。slot 必须由本采集端独占，禁止其他程序消费或手动推进。
-- 崩溃后清理不可见的未完成事务块，从持久位置重放；已发布但未被 HTTP 确认的消息保留原始内容和 ID 重发。
+- 崩溃后清理不可见的未完成事务块，从持久位置重放；未确认消息保留原始内容和 ID 重发。已确认消息默认再保留 7 天或 20 GiB，供标准服务端主动回拉。
 - 收到响应不明确、请求超时或连接中断均可能产生重复。接收端必须持久化后 ACK，并按消息 ID 去重；否则无法保证端到端至少一次。
 - PostgreSQL 重启回退 slot 进度时，已经持久化的事务按事务结束 LSN 跳过。
 - 采集磁盘永久损坏、源 WAL/slot 丢失、主备切换不提供自动无损恢复。检测到源身份/时间线变化、slot 不匹配或可检测的 slot 超前时停止。
@@ -116,13 +118,15 @@ max_wal_senders = 10
 curl http://127.0.0.1:9108/metrics
 ```
 
-省略或设为 `""` 则禁用；示例配置绑定本机。监听失败会在启动采集前报错，退出时关闭接口。修改监控地址无需重新全量，不影响持久队列或采集范围指纹。接口不提供鉴权/TLS，不注册 pprof；跨机器抓取时只监听可信内网，并通过防火墙或反向代理限制访问。
+省略或设为 `""` 则不开放本地 HTTP 指标接口；使用 gRPC 时仍会创建指标注册表并默认每 30 秒上报标准服务端，由服务端写入 VictoriaMetrics。监听失败会在启动采集前报错，退出时关闭接口。修改监控地址无需重新全量，不影响持久队列或采集范围指纹。接口不提供鉴权/TLS，不注册 pprof；跨机器抓取时只监听可信内网，并通过防火墙或反向代理限制访问。
 
 覆盖采集事务/行数、连接重试、WAL 保留与字节积压、队列已发布/暂存消息、磁盘余量、HTTP 耗时/重试/无效 ACK、确认投递量、schema 漂移及 Go/进程指标。Counter 在进程重启时归零，队列 Gauge 从磁盘恢复；成功 HTTP 请求和本地确认投递分别计数。
 
 完整指标口径、PromQL、抓取配置和告警示例见 [docs/metrics.md](docs/metrics.md)。Schema 自动适配仍是待实现项；监控功能不改变当前“发现结构漂移则停止”的行为。
 
 ## 测试
+
+性能、稳定性、故障恢复和异常边界测试的分层说明见 [docs/testing.md](docs/testing.md)。
 
 ```sh
 make test

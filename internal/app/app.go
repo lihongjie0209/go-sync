@@ -39,6 +39,8 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 		return err
 	}
 	defer func() { result = errors.Join(result, q.Close()) }()
+	replayAge, _ := time.ParseDuration(c.Replay.MaxAge)
+	q.ConfigureReplay(replayAge, c.Replay.MaxBytes)
 	st, err := q.State()
 	if err != nil {
 		return err
@@ -60,8 +62,10 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 	}()
 	var metrics *telemetry.Metrics
 	var metricsServer *telemetry.Server
-	if c.MetricsAddr != "" {
+	if c.MetricsAddr != "" || c.DeliveryTransport() == "grpc" {
 		metrics = telemetry.New(q, c)
+	}
+	if c.MetricsAddr != "" {
 		metricsServer, err = telemetry.Listen(c.MetricsAddr, metrics)
 		if err != nil {
 			return err
@@ -82,7 +86,12 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 		}
 		return capture.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
 	})
-	g.Go(func() error { return delivery.New(c, log).WithMetrics(metrics).Run(groupCtx, q) })
+	g.Go(func() error {
+		if c.DeliveryTransport() == "grpc" {
+			return delivery.NewGRPC(c, log).WithMetrics(metrics).Run(groupCtx, q)
+		}
+		return delivery.New(c, log).WithMetrics(metrics).Run(groupCtx, q)
+	})
 	g.Go(func() error {
 		var storageWarningAt time.Time
 		for {

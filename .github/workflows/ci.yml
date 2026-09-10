@@ -30,8 +30,19 @@ jobs:
         run: go mod tidy && git diff --exit-code -- go.mod go.sum
       - name: Vet
         run: go vet ./...
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "25.1"
+      - name: Verify generated protobuf
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          protoc --go_out=. --go_opt=module=go-sync --go-grpc_out=. --go-grpc_opt=module=go-sync proto/sync/v1/sync.proto
+          git diff --exit-code -- internal/rpc
       - name: Unit tests with race detector
         run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+      - name: Benchmark smoke tests
+        run: go test -run '^$' -bench . -benchmem -benchtime=100ms -count=1 ./internal/event ./internal/queue ./internal/server
       - name: Validate release packages
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -41,7 +52,7 @@ jobs:
       - name: Upload snapshot packages
         uses: actions/upload-artifact@v7
         with:
-          name: go-sync-windows-snapshot
+          name: go-sync-snapshot
           path: |
             dist/*.zip
             dist/checksums.txt

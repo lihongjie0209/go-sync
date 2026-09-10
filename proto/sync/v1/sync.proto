@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package gosync.v1;
+
+option go_package = "go-sync/internal/rpc/syncv1;syncv1";
+
+service Replication {
+  rpc Connect(stream CollectorFrame) returns (stream ServerFrame);
+}
+
+service Admin {
+  rpc ListSyncers(ListSyncersRequest) returns (ListSyncersResponse);
+  rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+}
+
+message CollectorFrame {
+  oneof body {
+    Hello hello = 1;
+    Event event = 2;
+    ReplayUnavailable replay_unavailable = 3;
+    Metrics metrics = 4;
+    Idle idle = 5;
+  }
+}
+
+message ServerFrame {
+  oneof body {
+    Pull pull = 1;
+    Ack ack = 2;
+  }
+}
+
+message Hello {
+  string syncer_id = 1;
+  string generation = 2;
+  uint64 earliest_seq = 3;
+  uint64 ready_seq = 4;
+  string protocol_version = 5;
+}
+
+message Event {
+  uint64 seq = 1;
+  string message_id = 2;
+  bytes json = 3;
+}
+
+message ReplayUnavailable {
+  uint64 requested_seq = 1;
+  uint64 earliest_seq = 2;
+}
+
+message Idle {
+  uint64 ready_seq = 1;
+}
+
+message Pull {
+  string generation = 1;
+  uint64 seq = 2;
+}
+
+message Ack {
+  string generation = 1;
+  uint64 seq = 2;
+  string message_id = 3;
+}
+
+// Metrics contains one Prometheus text exposition snapshot. The server adds
+// trusted syncer_id and component labels before forwarding it.
+message Metrics {
+  bytes prometheus_text = 1;
+  int64 collected_at_unix_milli = 2;
+}
+
+message ListSyncersRequest {}
+
+message SyncerStatus {
+  string id = 1;
+  bool connected = 2;
+  string generation = 3;
+  uint64 received_seq = 4;
+  uint64 applied_seq = 5;
+  string error = 6;
+}
+
+message ListSyncersResponse {
+  repeated SyncerStatus syncers = 1;
+  string config_hash = 2;
+  string last_reload_error = 3;
+}
+
+message ReloadConfigRequest {}
+
+message ReloadConfigResponse {
+  string config_hash = 1;
+}

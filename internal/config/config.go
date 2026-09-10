@@ -42,9 +42,29 @@ type Log struct {
 	Compress   bool   `json:"compress,omitempty"`
 }
 
+type GRPCTLS struct {
+	CAFile     string `json:"ca_file"`
+	ServerName string `json:"server_name"`
+}
+
+type GRPC struct {
+	Address         string  `json:"address"`
+	Token           string  `json:"token"`
+	TLS             GRPCTLS `json:"tls"`
+	MetricsInterval string  `json:"metrics_interval,omitempty"`
+}
+
+type Replay struct {
+	MaxAge   string `json:"max_age,omitempty"`
+	MaxBytes int64  `json:"max_bytes,omitempty"`
+}
+
 func (t Table) String() string { return t.Schema + "." + t.Name }
 
 type Config struct {
+	Transport           string            `json:"transport,omitempty"`
+	GRPC                GRPC              `json:"grpc,omitempty"`
+	Replay              Replay            `json:"replay,omitempty"`
 	SourceType          string            `json:"source_type,omitempty"`
 	SQLServer           SQLServer         `json:"sqlserver,omitempty"`
 	SQLServerLegacy     SQLServerLegacy   `json:"sqlserver_legacy,omitempty"`
@@ -78,7 +98,8 @@ func Defaults() Config {
 		MySQL:           MySQL{ServerID: 100001, ConnectTimeout: "30s", SnapshotTimeout: "1h"},
 		Log:             Log{Level: "info", MaxSizeMB: 100, MaxBackups: 10, MaxAgeDays: 30, Compress: true},
 		BatchRows:       500, BatchBytes: 1 << 20, MaxRowBytes: 16 << 20,
-		HTTPTimeout: "30s", RetryMin: "1s", RetryMax: "60s"}
+		HTTPTimeout: "30s", RetryMin: "1s", RetryMax: "60s",
+		Replay: Replay{MaxAge: "168h", MaxBytes: 20 << 30}, GRPC: GRPC{MetricsInterval: "30s"}}
 }
 
 func Load(path string) (Config, error) {
@@ -98,6 +119,7 @@ func Load(path string) (Config, error) {
 	}
 	// Expand only secrets, not arbitrary configuration or paths.
 	c.DSN = os.ExpandEnv(c.DSN)
+	c.GRPC.Token = os.ExpandEnv(c.GRPC.Token)
 	for k, v := range c.Headers {
 		c.Headers[k] = os.ExpandEnv(v)
 	}
@@ -145,9 +167,20 @@ func (c Config) Validate() error {
 	if c.Engine() == "postgres" && !regexp.MustCompile(`^[a-z0-9_]{1,63}$`).MatchString(c.Slot) {
 		return errors.New("slot must contain 1–63 lowercase letters, digits or underscores")
 	}
-	u, err := url.Parse(c.URL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-		return errors.New("http_url must be an http(s) url without credentials")
+	if c.DeliveryTransport() == "http" {
+		u, err := url.Parse(c.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+			return errors.New("http_url must be an http(s) url without credentials")
+		}
+	} else if c.DeliveryTransport() == "grpc" {
+		if c.GRPC.Address == "" || c.GRPC.Token == "" || c.GRPC.TLS.CAFile == "" {
+			return errors.New("grpc address, token and tls.ca_file are required")
+		}
+		if strings.ContainsRune(c.GRPC.Address+c.GRPC.TLS.CAFile+c.GRPC.TLS.ServerName, 0) {
+			return errors.New("grpc configuration must not contain nul")
+		}
+	} else {
+		return errors.New("transport must be http or grpc")
 	}
 	if len(c.Tables) == 0 {
 		return errors.New("tables must not be empty")
@@ -187,6 +220,15 @@ func (c Config) Validate() error {
 		if e != nil || d <= 0 {
 			return errors.New("timeouts must be positive durations")
 		}
+	}
+	if d, err := time.ParseDuration(c.Replay.MaxAge); err != nil || d <= 0 {
+		return errors.New("replay.max_age must be a positive duration")
+	}
+	if c.Replay.MaxBytes < 1<<20 {
+		return errors.New("replay.max_bytes must be at least 1 MiB")
+	}
+	if d, err := time.ParseDuration(c.GRPC.MetricsInterval); err != nil || d < 5*time.Second {
+		return errors.New("grpc.metrics_interval must be at least 5s")
 	}
 	lo, _ := time.ParseDuration(c.RetryMin)
 	hi, _ := time.ParseDuration(c.RetryMax)
@@ -269,4 +311,12 @@ func (c Config) Engine() string {
 		return "postgres"
 	}
 	return c.SourceType
+}
+
+// DeliveryTransport preserves configurations created before gRPC support.
+func (c Config) DeliveryTransport() string {
+	if c.Transport == "" {
+		return "http"
+	}
+	return strings.ToLower(c.Transport)
 }

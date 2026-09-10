@@ -1,0 +1,33 @@
+name: Stability
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Duration of the durable queue stress loop
+        required: false
+        default: 5m
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stability-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GO_SYNC_STABILITY_DURATION: ${{ inputs.duration || '5m' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Sustained durability and race test
+        run: go test -race -count=1 -timeout=15m -tags=stability ./internal/queue ./internal/server

@@ -1,0 +1,25 @@
+{
+  "grpc": {
+    "listen_addr": "0.0.0.0:7443",
+    "tls_cert_file": "server.crt",
+    "tls_key_file": "server.key",
+    "max_message_bytes": 33554432
+  },
+  "admin_token": "${GO_SYNC_ADMIN_TOKEN}",
+  "metrics_addr": "127.0.0.1:9100",
+  "victoria_metrics": {
+    "url": "http://127.0.0.1:8428/api/v1/import/prometheus",
+    "interval": "30s",
+    "timeout": "15s",
+    "headers": {}
+  },
+  "reconcile": {"daily_at": "02:00", "timezone": "Asia/Shanghai", "buckets": 256, "auto_repair": true},
+  "log": {"file": "logs/go-sync-server.log", "level": "info", "max_size_mb": 100, "max_backups": 10, "max_age_days": 30, "compress": true},
+  "syncers": [{
+    "id": "pms-client-01",
+    "token": "${PMS_SYNC_TOKEN}",
+    "postgres": {"dsn": "${PMS_TARGET_DSN}", "target_schema": "pms", "metadata_schema": "go_sync_meta"},
+    "tables": [{"source_schema": "public", "name": "documents"}],
+    "file_columns": [{"source_schema": "public", "table": "documents", "source_column": "file_path", "content_column": "file_content"}]
+  }]
+}

@@ -16,6 +16,13 @@ import (
 // Open creates a logger. Relative file paths are resolved from configDir.
 // The returned close function must be called after the logger is no longer used.
 func Open(c config.Config, configDir string, console io.Writer) (*slog.Logger, func() error, error) {
+	logger, closeLog, _, err := OpenDynamic(c, configDir, console)
+	return logger, closeLog, err
+}
+
+// OpenDynamic also returns the LevelVar used by the handler so long-running
+// services can change verbosity after an atomic configuration reload.
+func OpenDynamic(c config.Config, configDir string, console io.Writer) (*slog.Logger, func() error, *slog.LevelVar, error) {
 	level := new(slog.LevelVar)
 	switch strings.ToLower(c.Log.Level) {
 	case "debug":
@@ -27,7 +34,7 @@ func Open(c config.Config, configDir string, console io.Writer) (*slog.Logger, f
 	case "error":
 		level.Set(slog.LevelError)
 	default:
-		return nil, func() error { return nil }, errors.New("invalid log level")
+		return nil, func() error { return nil }, level, errors.New("invalid log level")
 	}
 
 	writers := make([]io.Writer, 0, 2)
@@ -42,7 +49,7 @@ func Open(c config.Config, configDir string, console io.Writer) (*slog.Logger, f
 		}
 		path = filepath.Clean(path)
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return nil, closeLog, err
+			return nil, closeLog, level, err
 		}
 		rotator := &lumberjack.Logger{
 			Filename:   path,
@@ -55,7 +62,7 @@ func Open(c config.Config, configDir string, console io.Writer) (*slog.Logger, f
 		closeLog = rotator.Close
 	}
 	if len(writers) == 0 {
-		return nil, closeLog, errors.New("no log output configured")
+		return nil, closeLog, level, errors.New("no log output configured")
 	}
-	return slog.New(slog.NewJSONHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: level})), closeLog, nil
+	return slog.New(slog.NewJSONHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: level})), closeLog, level, nil
 }

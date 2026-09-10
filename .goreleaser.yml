@@ -17,6 +17,24 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X main.version={{ .Version }}
+  - id: go-sync-server
+    main: ./cmd/go-sync-server
+    binary: go-sync-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+    goarch:
+      - amd64
+      - "386"
+    ignore:
+      - goos: linux
+        goarch: "386"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
 
 archives:
   - id: windows
@@ -32,6 +50,18 @@ archives:
       - config.sqlserver.example.json
       - config.sqlserver-legacy.example.json
       - config.mysql.example.json
+      - config.grpc.example.json
+      - docs/**
+  - id: server
+    ids:
+      - go-sync-server
+    formats:
+      - zip
+    name_template: >-
+      {{ .ProjectName }}-server_{{ .Version }}_{{ .Os }}_{{ if eq .Arch "386" }}x86{{ else }}x64{{ end }}
+    files:
+      - README.md
+      - server.config.example.json
       - docs/**
 
 checksum:
