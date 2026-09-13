@@ -164,7 +164,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return err
 		})
 	}
-	g.Go(func() error { return s.metrics.runVM(groupCtx, s.vmConfig) })
+	if cfg.VictoriaMetrics.URL != "" {
+		g.Go(func() error { return s.metrics.runVM(groupCtx, s.vmConfig) })
+	}
 	g.Go(func() error { return s.watch(groupCtx) })
 	s.log.InfoContext(ctx, "server started", "grpc_address", listener.Addr().String(), "metrics_address", cfg.MetricsAddr)
 	err = g.Wait()

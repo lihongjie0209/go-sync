@@ -6,7 +6,7 @@ Go 编写的数据同步系统：采集端支持 PostgreSQL 逻辑 slot、SQL Se
 
 SQL Server 接入及配置见 [SQL Server 全量与 CDC](docs/sqlserver.md) 和 `config.sqlserver.example.json`。SQL Server 2008/2008 R2 仍需真实旧引擎验收；首次全量表锁必须显式开启。以下原有配置说明默认针对 PostgreSQL。
 
-SQL Server 2000 使用独立的触发器 Outbox 和经过真实 8.00.194 实例验证的 TDS 7.1 驱动兼容层，参见 [SQL Server 2000](docs/sqlserver-legacy.md) 和 `config.sqlserver-legacy.example.json`。它不依赖原生 CDC，但必须允许采集账号创建辅助表和业务表触发器。
+SQL Server 2000 与不提供原生 CDC 的 SQL Server 2008 R2 Express 使用独立的触发器 Outbox 和 TDS 7.1 驱动兼容层，参见 [SQL Server legacy](docs/sqlserver-legacy.md) 和 `config.sqlserver-legacy.example.json`。它不依赖原生 CDC，但必须允许采集账号创建辅助表和业务表触发器。
 
 MySQL 5.6/5.7 使用 ROW binlog，支持一致性全量、事务级增量和无主键表，参见 [MySQL 5.6/5.7](docs/mysql.md) 和 `config.mysql.example.json`。
 

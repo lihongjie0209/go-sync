@@ -37,6 +37,7 @@ type Table struct {
 	Columns     []Column `json:"columns"`
 	ObjectID    int      `json:"object_id"`
 	TriggerName string   `json:"trigger_name"`
+	Modern      bool     `json:"modern,omitempty"`
 }
 
 func (t Table) sqlName() string { return quote(t.Schema) + "." + quote(t.Name) }
@@ -87,14 +88,15 @@ func inspect(ctx context.Context, q querier, c config.Config) (Inspection, error
  CONVERT(varchar(128),SERVERPROPERTY('Edition')),DB_NAME()`).Scan(&info.Version, &info.Edition, &info.Database); err != nil {
 		return info, dbError(err)
 	}
-	if !strings.HasPrefix(info.Version, "8.") {
-		return info, errors.New("sqlserver_legacy requires sql server 2000 version 8.x")
+	modern := strings.HasPrefix(info.Version, "10.50.")
+	if !strings.HasPrefix(info.Version, "8.") && !modern {
+		return info, errors.New("sqlserver_legacy requires sql server 2000 or 2008 R2")
 	}
 	wanted := slices.Clone(c.Tables)
 	slices.SortFunc(wanted, func(a, b config.Table) int { return strings.Compare(a.String(), b.String()) })
 	seen := map[int]bool{}
 	for _, ref := range wanted {
-		table, err := readTable(ctx, q, c, ref)
+		table, err := readTable(ctx, q, c, ref, modern)
 		if err != nil {
 			return info, fmt.Errorf("inspect legacy table %s: %w", ref.String(), err)
 		}
@@ -147,8 +149,8 @@ func inspect(ctx context.Context, q querier, c config.Config) (Inspection, error
 	return info, nil
 }
 
-func readTable(ctx context.Context, q querier, c config.Config, ref config.Table) (Table, error) {
-	t := Table{SourceType: "sqlserver_legacy", Schema: ref.Schema, Name: ref.Name, Columns: []Column{}}
+func readTable(ctx context.Context, q querier, c config.Config, ref config.Table, modern bool) (Table, error) {
+	t := Table{SourceType: "sqlserver_legacy", Schema: ref.Schema, Name: ref.Name, Columns: []Column{}, Modern: modern}
 	if err := q.QueryRowContext(ctx, `SELECT o.id FROM sysobjects o JOIN sysusers u ON u.uid=o.uid
  WHERE o.xtype='U' AND u.name=@p1 AND o.name=@p2`, ref.Schema, ref.Name).Scan(&t.ObjectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -178,7 +180,7 @@ func readTable(ctx context.Context, q querier, c config.Config, ref config.Table
 		if computed {
 			continue
 		}
-		if legacyLOB(col.BaseType) {
+		if legacyLOB(col.BaseType) && !modern {
 			return t, errors.New("text, ntext and image columns are unsupported in strict legacy capture")
 		}
 		var typeErr error
@@ -198,6 +200,11 @@ func readTable(ctx context.Context, q querier, c config.Config, ref config.Table
 	}
 	if !hasPrimary {
 		t.RowIdentity = "full_row"
+		for _, col := range t.Columns {
+			if legacyLOB(col.BaseType) {
+				return t, errors.New("text, ntext and image require a primary key on SQL Server 2008 R2")
+			}
+		}
 	}
 	return t, nil
 }
@@ -212,6 +219,8 @@ func typeName(base string, length, precision, scale int) (string, error) {
 	case "decimal", "numeric":
 		return fmt.Sprintf("%s(%d,%d)", base, precision, scale), nil
 	case "bigint", "int", "smallint", "tinyint", "bit", "money", "smallmoney", "float", "real", "datetime", "smalldatetime", "uniqueidentifier", "timestamp":
+		return base, nil
+	case "text", "ntext", "image":
 		return base, nil
 	default:
 		return "", fmt.Errorf("unsupported sqlserver 2000 type %q", base)

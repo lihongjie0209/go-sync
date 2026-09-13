@@ -167,16 +167,15 @@ func (c Config) Validate() error {
 			return errors.New("metrics_addr must be host:port")
 		}
 	}
-	if c.VictoriaMetrics.URL == "" {
-		return errors.New("victoria_metrics.url is required")
-	}
-	u, err := url.Parse(c.VictoriaMetrics.URL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-		return errors.New("victoria_metrics.url must be an http(s) URL without credentials")
-	}
-	for _, value := range []string{c.VictoriaMetrics.Interval, c.VictoriaMetrics.Timeout} {
-		if duration, err := time.ParseDuration(value); err != nil || duration < time.Second {
-			return errors.New("VictoriaMetrics interval and timeout must be at least 1s")
+	if c.VictoriaMetrics.URL != "" {
+		u, err := url.Parse(c.VictoriaMetrics.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+			return errors.New("victoria_metrics.url must be an http(s) URL without credentials")
+		}
+		for _, value := range []string{c.VictoriaMetrics.Interval, c.VictoriaMetrics.Timeout} {
+			if duration, err := time.ParseDuration(value); err != nil || duration < time.Second {
+				return errors.New("VictoriaMetrics interval and timeout must be at least 1s")
+			}
 		}
 	}
 	for name, value := range c.VictoriaMetrics.Headers {

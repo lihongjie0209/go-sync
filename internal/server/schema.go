@@ -226,6 +226,14 @@ func sqlServerTargetType(column sourceSchemaColumn) (string, error) {
 		return "text", nil
 	case "binary", "varbinary", "image", "timestamp", "rowversion":
 		return "bytea", nil
+	case "decimal", "numeric":
+		return numericTargetType(column.Type)
+	case "money":
+		return "numeric(19,4)", nil
+	case "smallmoney":
+		return "numeric(10,4)", nil
+	case "uniqueidentifier":
+		return "uuid", nil
 	case "date":
 		return "date", nil
 	case "datetime", "datetime2", "smalldatetime":

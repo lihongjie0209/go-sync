@@ -1,6 +1,6 @@
-# SQL Server 2000 全量与增量
+# SQL Server 2000 / 2008 R2 Express 全量与增量
 
-使用 `source_type: "sqlserver_legacy"`。SQL Server 2000 没有原生 CDC，本模式自动创建自有 Outbox 表及每张目标表的 AFTER DML 触发器。`check` 始终只读；`run` 仅在 `sqlserver_legacy.auto_install=true` 时安装缺少的对象。
+使用 `source_type: "sqlserver_legacy"`。SQL Server 2000 和不提供 CDC 的 SQL Server 2008 R2 Express 使用本模式：它自动创建自有 Outbox 表及每张目标表的 AFTER DML 触发器。`check` 始终只读；`run` 仅在 `sqlserver_legacy.auto_install=true` 时安装缺少的对象。
 
 ## 一致性与恢复
 
@@ -25,9 +25,11 @@
 
 ## 类型和驱动限制
 
-严格模式拒绝包含 `text`、`ntext` 或 `image` 的目标表。SQL Server 的 AFTER 触发器不能从 `inserted/deleted` 读取这些旧 LOB 类型，尤其无法可靠获得 DELETE 前镜像；采集器不会静默省略字段。
+SQL Server 2000 严格模式拒绝包含 `text`、`ntext` 或 `image` 的目标表。SQL Server 2008 R2 模式允许有主键表使用这些旧 LOB 类型：INSERT/UPDATE 通过主键从业务表读取完整新镜像，DELETE 只记录主键并将无关 LOB 占位为 NULL。这样不会从 AFTER 触发器禁止访问的 `inserted/deleted` LOB 列读取数据。含旧 LOB 的无主键表仍会被拒绝，因为无法构造可靠的行身份。
 
-连接层使用 Microsoft `go-mssqldb` 的公开兼容分支，并仅对 `sqlserver_legacy` 显式启用 TDS 7.1。兼容层关闭 TDS 7.2 请求头、使用 SQL 批次管理事务，同时保留现代 SQL Server 数据源的默认 TDS 行为。该实现已在 SQL Server 2000 Enterprise 8.00.194（32 位）上验证登录、参数查询、提交/回滚、Unicode、decimal、datetime、binary、无主键表全量和 INSERT/UPDATE/DELETE 增量。
+2008 R2 模式的 Outbox 使用 `varchar(max)`、`nvarchar(max)` 和 `varbinary(max)`，不会把照片等值截断到 8 KiB。目标 PostgreSQL 对应类型分别为 `text` 和 `bytea`。
+
+连接层使用 Microsoft `go-mssqldb` 的公开兼容分支，并仅对 `sqlserver_legacy` 显式启用 TDS 7.1。兼容层关闭 TDS 7.2 请求头、使用 SQL 批次管理事务，同时保留现代 SQL Server 数据源的默认 TDS 行为。该实现已在 SQL Server 2000 Enterprise 8.00.194（32 位）验证基础兼容，并在 SQL Server 2008 R2 10.50 SP2 Express Advanced Services（64 位）验证全库目录检查及 LOB 触发器生成。
 
 SQL Server 2000 无法使用当前驱动的 TLS 握手，因此 legacy DSN 必须显式设置 `encrypt=disable`。只应在可信内网或受保护隧道中使用，并通过独立、最小权限账号限制风险。
 

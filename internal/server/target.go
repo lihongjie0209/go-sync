@@ -130,8 +130,16 @@ func quote(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`
 
 func (t *target) migrate(ctx context.Context) error {
 	meta := quote(t.cfg.Postgres.MetadataSchema)
+	var schemaExists bool
+	if err := t.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)", t.cfg.Postgres.MetadataSchema).Scan(&schemaExists); err != nil {
+		return fmt.Errorf("inspect server metadata schema: %w", err)
+	}
+	if !schemaExists {
+		if _, err := t.pool.Exec(ctx, "CREATE SCHEMA "+meta); err != nil {
+			return fmt.Errorf("create server metadata schema: %w", err)
+		}
+	}
 	statements := []string{
-		"CREATE SCHEMA IF NOT EXISTS " + meta,
 		"CREATE TABLE IF NOT EXISTS " + meta + `.sync_state (
             syncer_id text PRIMARY KEY,
             generation text NOT NULL DEFAULT '',

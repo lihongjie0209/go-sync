@@ -49,6 +49,31 @@ func TestTriggerSQLCapturesBothImagesAndQuotesIdentifiers(t *testing.T) {
 	}
 }
 
+func TestModernTriggerCapturesLOBWithoutReadingDeletedLOB(t *testing.T) {
+	t.Parallel()
+	c := config.Defaults()
+	c.SourceType = "sqlserver_legacy"
+	c.SQLServerLegacy.Owner = "dbo"
+	table := Table{Schema: "dbo", Name: "photos", ObjectID: 43, TriggerName: triggerName(c, 43), Modern: true, Columns: []Column{
+		{Name: "id", BaseType: "bigint", Type: "bigint", Primary: true},
+		{Name: "body", BaseType: "ntext", Type: "ntext"},
+		{Name: "photo", BaseType: "image", Type: "image"},
+	}}
+	sql := triggerSQL(c, table)
+	for _, fragment := range []string{
+		"SELECT d.[id],CAST(NULL AS nvarchar(max)),CAST(NULL AS varbinary(max)) FROM deleted AS d",
+		"SELECT b.[id],b.[body],b.[photo] FROM [dbo].[photos] AS b INNER JOIN inserted AS i ON b.[id]=i.[id]",
+		"CONVERT(nvarchar(max),@v2)", "CONVERT(varbinary(max),@v3)",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("generated modern trigger is missing %q\n%s", fragment, sql)
+		}
+	}
+	if strings.Contains(sql, "d.[body]") || strings.Contains(sql, "d.[photo]") {
+		t.Fatal("generated modern trigger reads a legacy LOB from deleted")
+	}
+}
+
 func TestNormalizeLegacyValues(t *testing.T) {
 	t.Parallel()
 	floatBytes := []byte{0x3f, 0xb9, 0x99, 0x99, 0x99, 0x99, 0x99, 0x9a}

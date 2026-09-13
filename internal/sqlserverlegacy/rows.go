@@ -72,8 +72,12 @@ func snapshotRows(ctx context.Context, q querier, table Table, b *batch) (count 
 	for i, col := range table.Columns {
 		name := quote(col.Name)
 		switch col.BaseType {
-		case "binary", "varbinary", "timestamp", "float", "real":
-			fields[i] = "CONVERT(varbinary(8000)," + name + ")"
+		case "binary", "varbinary", "timestamp", "float", "real", "image":
+			fields[i] = "CONVERT(varbinary(max)," + name + ")"
+		case "ntext":
+			fields[i] = "CONVERT(nvarchar(max)," + name + ")"
+		case "text":
+			fields[i] = "CONVERT(varchar(max)," + name + ")"
 		case "datetime", "smalldatetime":
 			fields[i] = "CONVERT(varchar(30)," + name + ",126)"
 		case "money", "smallmoney":
@@ -102,7 +106,7 @@ func snapshotRows(ctx context.Context, q querier, table Table, b *batch) (count 
 		}
 		columns := make([]event.Column, len(table.Columns))
 		for i, col := range table.Columns {
-			isBinary := col.BaseType == "binary" || col.BaseType == "varbinary" || col.BaseType == "timestamp" || col.BaseType == "float" || col.BaseType == "real"
+			isBinary := col.BaseType == "binary" || col.BaseType == "varbinary" || col.BaseType == "image" || col.BaseType == "timestamp" || col.BaseType == "float" || col.BaseType == "real"
 			value, err := normalize(col, values[i], values[i] == nil, isBinary)
 			if err != nil {
 				return count, err

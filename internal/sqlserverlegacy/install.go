@@ -34,12 +34,16 @@ func install(ctx context.Context, db *sql.DB, c config.Config, tables []Table) (
 		return errors.New("partial sqlserver legacy installation found; manual repair required")
 	}
 	if allMissing {
+		valueText, valueUnicode, valueBinary := "varchar(8000)", "nvarchar(4000)", "varbinary(8000)"
+		if len(tables) > 0 && tables[0].Modern {
+			valueText, valueUnicode, valueBinary = "varchar(max)", "nvarchar(max)", "varbinary(max)"
+		}
 		statements := []string{
 			"CREATE TABLE " + control + ` (singleton int NOT NULL PRIMARY KEY CHECK(singleton=1),product_id varchar(32) NOT NULL,source_guid uniqueidentifier NOT NULL,schema_version int NOT NULL,scope_hash char(64) NOT NULL)`,
 			"INSERT INTO " + control + fmt.Sprintf(" (singleton,product_id,source_guid,schema_version,scope_hash) VALUES (1,'go-sync/sqlserver-legacy',NEWID(),%d,'%s')", schemaVersion, schemaHash(tables)),
 			"CREATE TABLE " + events + ` (change_id bigint IDENTITY(1,1) NOT NULL PRIMARY KEY,statement_id uniqueidentifier NOT NULL,object_id int NOT NULL,operation char(1) NOT NULL,created_at datetime NOT NULL DEFAULT GETDATE())`,
 			"CREATE INDEX " + quote(c.SQLServerLegacy.Prefix+"_events_statement") + " ON " + events + " (statement_id,change_id)",
-			"CREATE TABLE " + values + ` (change_id bigint NOT NULL,ordinal smallint NOT NULL,is_null bit NOT NULL,value_text varchar(8000) NULL,value_unicode nvarchar(4000) NULL,value_binary varbinary(8000) NULL,PRIMARY KEY(change_id,ordinal))`,
+			"CREATE TABLE " + values + " (change_id bigint NOT NULL,ordinal smallint NOT NULL,is_null bit NOT NULL,value_text " + valueText + " NULL,value_unicode " + valueUnicode + " NULL,value_binary " + valueBinary + " NULL,PRIMARY KEY(change_id,ordinal))",
 			"CREATE TABLE " + manifest + ` (object_id int NOT NULL PRIMARY KEY,trigger_owner varchar(64) NOT NULL,trigger_name varchar(128) NOT NULL,schema_hash char(64) NOT NULL)`,
 		}
 		for _, statement := range statements {
@@ -149,16 +153,27 @@ func installTrigger(ctx context.Context, tx *sql.Tx, c config.Config, table Tabl
 
 func triggerSQL(c config.Config, table Table) string {
 	_, events, values := names(c)
-	var declarations, fields, variables []string
+	var declarations, variables []string
 	for i, col := range table.Columns {
 		variable := fmt.Sprintf("@v%d", i+1)
 		declarations = append(declarations, variable+" "+variableType(col))
-		fields = append(fields, quote(col.Name))
 		variables = append(variables, variable)
 	}
-	body := func(cursor, source, operation string) string {
+	body := func(cursor, source, operation string, deleted bool) string {
+		fields := make([]string, 0, len(table.Columns))
 		var inserts []string
 		for i, col := range table.Columns {
+			field := quote(col.Name)
+			if table.Modern && hasLegacyLOB(table) {
+				if deleted && legacyLOB(col.BaseType) {
+					field = "CAST(NULL AS " + variableType(col) + ")"
+				} else if deleted {
+					field = "d." + field
+				} else {
+					field = "b." + field
+				}
+			}
+			fields = append(fields, field)
 			v := variables[i]
 			text, unicode, binary := valueExpressions(col, v)
 			inserts = append(inserts, "INSERT INTO "+values+" (change_id,ordinal,is_null,value_text,value_unicode,value_binary) VALUES (@id,"+
@@ -171,16 +186,43 @@ func triggerSQL(c config.Config, table Table) string {
 			"\nEND\nCLOSE " + cursor + "\nDEALLOCATE " + cursor + "\n"
 	}
 	trigger := quote(table.Schema) + "." + quote(table.TriggerName)
+	deletedSource, insertedSource := "deleted", "inserted"
+	if table.Modern && hasLegacyLOB(table) {
+		deletedSource = "deleted AS d"
+		joins := make([]string, 0)
+		for _, col := range table.Columns {
+			if col.Primary {
+				name := quote(col.Name)
+				joins = append(joins, "b."+name+"=i."+name)
+			}
+		}
+		insertedSource = table.sqlName() + " AS b INNER JOIN inserted AS i ON " + strings.Join(joins, " AND ")
+	}
 	return "CREATE TRIGGER " + trigger + " ON " + table.sqlName() + " FOR INSERT,UPDATE,DELETE AS\n" +
 		"/* go-sync legacy managed v1 */\nSET NOCOUNT ON\nDECLARE @statement uniqueidentifier,@id bigint\nDECLARE " + strings.Join(declarations, ",") +
-		"\nSET @statement=NEWID()\nIF EXISTS(SELECT 1 FROM deleted) BEGIN\n" + body("go_sync_deleted", "deleted", "D") + "END\n" +
-		"IF EXISTS(SELECT 1 FROM inserted) BEGIN\n" + body("go_sync_inserted", "inserted", "I") + "END"
+		"\nSET @statement=NEWID()\nIF EXISTS(SELECT 1 FROM deleted) BEGIN\n" + body("go_sync_deleted", deletedSource, "D", true) + "END\n" +
+		"IF EXISTS(SELECT 1 FROM inserted) BEGIN\n" + body("go_sync_inserted", insertedSource, "I", false) + "END"
+}
+
+func hasLegacyLOB(table Table) bool {
+	for _, col := range table.Columns {
+		if legacyLOB(col.BaseType) {
+			return true
+		}
+	}
+	return false
 }
 
 func variableType(col Column) string {
 	switch col.BaseType {
 	case "timestamp":
 		return "binary(8)"
+	case "text":
+		return "varchar(max)"
+	case "ntext":
+		return "nvarchar(max)"
+	case "image":
+		return "varbinary(max)"
 	default:
 		return col.Type
 	}
@@ -189,10 +231,12 @@ func variableType(col Column) string {
 func valueExpressions(col Column, variable string) (text, unicode, binary string) {
 	text, unicode, binary = "NULL", "NULL", "NULL"
 	switch col.BaseType {
-	case "binary", "varbinary", "timestamp", "float", "real":
-		binary = "CONVERT(varbinary(8000)," + variable + ")"
-	case "nvarchar", "nchar":
-		unicode = "CONVERT(nvarchar(4000)," + variable + ")"
+	case "binary", "varbinary", "timestamp", "float", "real", "image":
+		binary = "CONVERT(varbinary(max)," + variable + ")"
+	case "nvarchar", "nchar", "ntext":
+		unicode = "CONVERT(nvarchar(max)," + variable + ")"
+	case "text":
+		text = "CONVERT(varchar(max)," + variable + ")"
 	case "datetime", "smalldatetime":
 		text = "CONVERT(varchar(30)," + variable + ",126)"
 	case "money", "smallmoney":
