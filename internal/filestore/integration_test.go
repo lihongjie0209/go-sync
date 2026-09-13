@@ -21,7 +21,7 @@ func TestS3StorePutReplaceAndDelete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	const accessKey, secretKey = "test-access", "test-secret-password"
-	container, err := testcontainers.Run(ctx, "minio/minio:RELEASE.2025-07-23T15-54-02Z",
+	container, err := testcontainers.Run(ctx, "quay.io/minio/minio@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0",
 		testcontainers.WithEnv(map[string]string{"MINIO_ROOT_USER": accessKey, "MINIO_ROOT_PASSWORD": secretKey}),
 		testcontainers.WithCmd("server", "/data"),
 		testcontainers.WithExposedPorts("9000/tcp"),
