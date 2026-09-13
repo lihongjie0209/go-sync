@@ -29,7 +29,7 @@ SQL Server 2000 严格模式拒绝包含 `text`、`ntext` 或 `image` 的目标�
 
 2008 R2 模式的 Outbox 使用 `varchar(max)`、`nvarchar(max)` 和 `varbinary(max)`，不会把照片等值截断到 8 KiB。目标 PostgreSQL 对应类型分别为 `text` 和 `bytea`。
 
-连接层使用 Microsoft `go-mssqldb` 的公开兼容分支，并仅对 `sqlserver_legacy` 显式启用 TDS 7.1。兼容层关闭 TDS 7.2 请求头、使用 SQL 批次管理事务，同时保留现代 SQL Server 数据源的默认 TDS 行为。该实现已在 SQL Server 2000 Enterprise 8.00.194（32 位）验证基础兼容，并在 SQL Server 2008 R2 10.50 SP2 Express Advanced Services（64 位）验证全库目录检查及 LOB 触发器生成。
+连接层使用 Microsoft `go-mssqldb` 的公开兼容分支。它先协商现代 TDS，使 SQL Server 2008 R2 能正确返回 `max` 类型元数据；连接失败时才回退专用于 SQL Server 2000 的 TDS 7.1 兼容模式。该实现已在 SQL Server 2000 Enterprise 8.00.194（32 位）验证基础兼容，并在 SQL Server 2008 R2 10.50 SP2 Express Advanced Services（64 位）验证全库目录检查及 LOB 触发器生成。
 
 SQL Server 2000 无法使用当前驱动的 TLS 握手，因此 legacy DSN 必须显式设置 `encrypt=disable`。只应在可信内网或受保护隧道中使用，并通过独立、最小权限账号限制风险。
 

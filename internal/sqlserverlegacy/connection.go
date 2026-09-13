@@ -43,8 +43,23 @@ func open(ctx context.Context, c config.Config) (*sql.DB, error) {
 	if parsed.Encryption != msdsn.EncryptionDisabled {
 		return nil, errors.New("sqlserver legacy dsn must set encrypt=disable because SQL Server 2000 does not support the driver's TLS handshake")
 	}
-	parsed.LegacyTDS71 = true
 	parsed.AppName, parsed.LogFlags, parsed.DialTimeout = "go-sync-legacy", 0, 10*time.Second
+	// SQL Server 2008 R2 needs its modern TDS metadata for max-sized values.
+	// SQL Server 2000 cannot negotiate that connection, so fall back to the
+	// explicitly supported TDS 7.1 compatibility mode only when necessary.
+	db, err := openConfig(ctx, parsed)
+	if err == nil {
+		return db, nil
+	}
+	parsed.LegacyTDS71 = true
+	db, legacyErr := openConfig(ctx, parsed)
+	if legacyErr != nil {
+		return nil, errors.Join(err, legacyErr)
+	}
+	return db, nil
+}
+
+func openConfig(ctx context.Context, parsed msdsn.Config) (*sql.DB, error) {
 	db := sql.OpenDB(mssql.NewConnectorConfig(parsed))
 	db.SetMaxOpenConns(3)
 	db.SetMaxIdleConns(3)
