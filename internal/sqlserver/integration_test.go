@@ -4,6 +4,7 @@ package sqlserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,7 +25,16 @@ import (
 )
 
 func TestSQLServerSnapshotCDCRecovery(t *testing.T) {
-	dsn, db := testsqlserver.Start(t)
+	runSQLServerSnapshotCDCRecovery(t, testsqlserver.Start)
+}
+
+func TestSQLServer2008R2SnapshotCDCRecovery(t *testing.T) {
+	runSQLServerSnapshotCDCRecovery(t, testsqlserver.StartExternal2008)
+}
+
+func runSQLServerSnapshotCDCRecovery(t *testing.T, start func(*testing.T) (string, *sql.DB)) {
+	t.Helper()
+	dsn, db := start(t)
 	// The parent covers container startup plus deliberate fence failure and the
 	// successful retry. Each production operation still uses its own timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)

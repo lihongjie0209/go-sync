@@ -1,7 +1,7 @@
 //go:build integration
 
-// Package testsqlserver owns disposable SQL Server fixtures via Testcontainers.
-// There is deliberately no external DSN fallback or manual Docker command.
+// Package testsqlserver owns disposable SQL Server fixtures. Normal integration
+// runs use Testcontainers; legacy acceptance runs require an explicit VM target.
 package testsqlserver
 
 import (
@@ -21,6 +21,118 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// StartExternal2008 initializes an isolated database on the explicitly
+// configured SQL Server 2008 R2 acceptance-test VM. The normal integration
+// suite continues to use Testcontainers through Start.
+func StartExternal2008(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	addr := os.Getenv("GO_SYNC_TEST_MSSQL_EXTERNAL_ADDR")
+	if addr == "" {
+		t.Skip("GO_SYNC_TEST_MSSQL_EXTERNAL_ADDR is not set")
+	}
+	password := os.Getenv("GO_SYNC_TEST_MSSQL_PASSWORD")
+	if password == "" {
+		t.Fatal("GO_SYNC_TEST_MSSQL_PASSWORD is required for the external SQL Server acceptance test")
+	}
+	username := os.Getenv("GO_SYNC_TEST_MSSQL_USER")
+	if username == "" {
+		username = "sa"
+	}
+	var token [8]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		t.Fatal(err)
+	}
+	database := "go_sync_test_" + hex.EncodeToString(token[:])
+	u := url.URL{Scheme: "sqlserver", Host: addr, User: url.UserPassword(username, password),
+		RawQuery: "database=master&encrypt=disable"}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	master := open(t, ctx, u.String())
+	var db *sql.DB
+	databaseCreated := false
+	t.Cleanup(func() {
+		if db != nil {
+			if err := db.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+		if databaseCreated {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cleanupCancel()
+			if _, err := master.ExecContext(cleanupCtx, "ALTER DATABASE ["+database+"] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE ["+database+"]"); err != nil {
+				t.Errorf("drop external SQL Server test database: %v", err)
+			}
+		}
+		if err := master.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	var version, edition string
+	if err := master.QueryRowContext(ctx, `SELECT CONVERT(nvarchar(128),SERVERPROPERTY('ProductVersion')),
+ CONVERT(nvarchar(128),SERVERPROPERTY('Edition'))`).Scan(&version, &edition); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Split(version, ".")[0] != "10" || !strings.Contains(strings.ToLower(edition), "enterprise") {
+		t.Fatalf("external engine must be SQL Server 2008 Enterprise: version=%s edition=%s", version, edition)
+	}
+	waitForAgent(t, ctx, master)
+	// database is generated exclusively from crypto-random hexadecimal bytes.
+	if _, err := master.ExecContext(ctx, "CREATE DATABASE ["+database+"]"); err != nil {
+		t.Fatal(err)
+	}
+	databaseCreated = true
+	if _, err := master.ExecContext(ctx, "ALTER DATABASE ["+database+"] SET ALLOW_SNAPSHOT_ISOLATION ON"); err != nil {
+		t.Fatal(err)
+	}
+	u.RawQuery = "database=" + url.QueryEscape(database) + "&encrypt=disable"
+	db = open(t, ctx, u.String())
+	if _, err := db.ExecContext(ctx, "EXEC sys.sp_cdc_enable_db"); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("external SQL Server engine %s edition %s database %s", version, edition, database)
+	return u.String(), db
+}
+
+func open(t *testing.T, ctx context.Context, dsn string) *sql.DB {
+	t.Helper()
+	connector, err := mssql.NewConnector(dsn)
+	if err != nil {
+		t.Fatal("invalid SQL Server fixture dsn")
+	}
+	db := sql.OpenDB(connector)
+	db.SetMaxOpenConns(4)
+	for {
+		if err := db.PingContext(ctx); err == nil {
+			return db
+		}
+		select {
+		case <-ctx.Done():
+			_ = db.Close()
+			t.Fatal("SQL Server fixture did not accept connections")
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func waitForAgent(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	for {
+		rows, err := db.QueryContext(ctx, "EXEC msdb.dbo.sp_help_job")
+		if err == nil {
+			err = rows.Close()
+		}
+		if err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("SQL Server Agent fixture did not become ready")
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
 
 // Start initializes only a disposable test database and verifies the real engine
 // major version. Setting compatibility_level=100 is NOT a SQL Server 2008 test.

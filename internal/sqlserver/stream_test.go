@@ -70,6 +70,7 @@ func TestCDCAssemblyNeverPublishesPartialTransaction(t *testing.T) {
 		{name: "orphan after", script: rowScript{data: [][]driver.Value{record(0, 1, 4)}}, wantError: true},
 		{name: "orphan before", script: rowScript{data: [][]driver.Value{record(0, 1, 3)}}, wantError: true},
 		{name: "wrong update table", script: rowScript{data: [][]driver.Value{record(0, 1, 3), record(1, 1, 4)}}, wantError: true},
+		{name: "sqlserver 2008 primary key update", script: rowScript{data: [][]driver.Value{record(0, 1, 1), record(0, 1, 2)}}, wantRows: 2},
 		{name: "duplicate position", script: rowScript{data: [][]driver.Value{record(0, 1, 2), record(0, 1, 2)}}, wantRows: 1, wantError: true},
 		{name: "connection interrupted", script: rowScript{data: [][]driver.Value{record(0, 1, 2)}, terminal: io.ErrUnexpectedEOF}, wantRows: 1, wantError: true},
 	} {

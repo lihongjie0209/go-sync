@@ -207,7 +207,10 @@ func readChanges(ctx context.Context, q querier, tables []Table, end lsn, b *bat
 			return count, err
 		}
 		r.values = r.values[:len(tables[r.table].Columns)]
-		if previous != nil && samePosition(*previous, r) && !(previous.operation == 3 && r.operation == 4) {
+		// SQL Server 2008 R2 may encode a primary-key update as DELETE and
+		// INSERT at the same seqval. operation is the final stable tie-breaker,
+		// so only two rows with the same operation remain ambiguous.
+		if previous != nil && samePosition(*previous, r) && previous.operation == r.operation {
 			return count, errors.New("ambiguous cdc row ordering")
 		}
 		previous = &r

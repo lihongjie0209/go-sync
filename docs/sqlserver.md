@@ -115,7 +115,7 @@ SQL Server 不采样 PG WAL 字节指标。`capture_streaming=1` 或成功轮询
 
 ## 测试 SQL Server 2008
 
-测试统一由 Testcontainers 创建和清理数据库容器，没有外部 DSN 或手动 Docker 的后门。默认现代引擎回归命令：
+默认集成测试仍统一由 Testcontainers 创建和清理数据库容器，没有手动 Docker 后门。默认现代引擎回归命令：
 
 ```sh
 go test -tags=integration -run '^TestSQLServerSnapshotCDCRecovery$' -v ./internal/sqlserver -timeout 15m
@@ -123,7 +123,19 @@ go test -tags=integration -run '^TestSQLServerSnapshotCDCRecovery$' -v ./interna
 
 2008 需要真实旧引擎，**设置现代 SQL Server 的 compatibility_level=100 并不是 2008 测试**。微软官方 Linux SQL Server 容器从 2017 系列起，不能直接用于 2008。[官方容器说明](https://learn.microsoft.com/en-us/sql/linux/quickstart-install-connect-docker)
 
-若继续坚持旧引擎也由 Testcontainers 管理，需要准备合法授权、可运行的自定义镜像，封装 Windows + SQL Server 2008（例如虚拟机），而不是把 2008 Windows 二进制塞入 Linux SQL Server 镜像。本项目暂未提供这类 Windows 虚拟机镜像或自动安装脚本。镜像需启动真实引擎、启用 Agent、按测试夹具约定接受测试密码并暴露 1433；宿主机/虚拟化设备要求还需按镜像单独配置。
+真实 2008 R2 由专用 Hyper-V 验收环境覆盖，因为微软没有可由 Testcontainers 启动的 2008 容器镜像。该测试必须显式提供地址和由密钥管理器注入的密码；夹具创建随机命名的独立数据库，启用 snapshot isolation/CDC，并在测试结束时强制删除该数据库。未配置地址时仅该验收用例跳过，不影响默认 Testcontainers 回归：
+
+```sh
+GO_SYNC_TEST_MSSQL_EXTERNAL_ADDR=10.10.0.101:21433 \
+GO_SYNC_TEST_MSSQL_USER=sa \
+GO_SYNC_TEST_MSSQL_PASSWORD='injected-secret' \
+go test -tags=integration -count=1 \
+  -run '^TestSQLServer2008R2SnapshotCDCRecovery$' -v ./internal/sqlserver -timeout 15m
+```
+
+验收用例会查询真实 `ProductVersion` 和 `Edition`，只接受主版本 10 的 Enterprise，并等待 SQL Server Agent 可用。密码不得写入仓库、命令历史或测试日志。
+
+若继续坚持旧引擎也由 Testcontainers 管理，需要准备合法授权、可运行的自定义 Windows 容器镜像，而不是把 2008 Windows 二进制塞入 Linux SQL Server 镜像。镜像需启动真实引擎、启用 Agent、按测试夹具约定接受测试密码并暴露 1433；宿主机/虚拟化设备要求还需按镜像单独配置。
 
 镜像就绪后，夹具支持指定镜像并验证实际引擎主版本，版本不符直接失败：
 
