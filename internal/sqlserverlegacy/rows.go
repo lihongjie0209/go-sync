@@ -68,6 +68,35 @@ func key(table Table, columns []event.Column) ([]event.Column, error) {
 }
 
 func snapshotRows(ctx context.Context, q querier, table Table, b *batch) (count uint64, result error) {
+	fields := snapshotFields(table)
+	rows, err := q.QueryContext(ctx, "SELECT "+strings.Join(fields, ",")+" FROM "+table.sqlName())
+	if err != nil {
+		return 0, dbError(err)
+	}
+	defer func() { result = errors.Join(result, dbError(rows.Close())) }()
+	for rows.Next() {
+		values := make([][]byte, len(table.Columns))
+		args := make([]any, len(values))
+		for i := range values {
+			args[i] = &values[i]
+		}
+		if err := rows.Scan(args...); err != nil {
+			return count, dbError(err)
+		}
+		row, err := snapshotRow(table, values)
+		if err != nil {
+			return count, err
+		}
+		if err := b.add(ctx, row); err != nil {
+			return count, err
+		}
+		count++
+		b.metrics.SQLSnapshotScanned()
+	}
+	return count, dbError(rows.Err())
+}
+
+func snapshotFields(table Table) []string {
 	fields := make([]string, len(table.Columns))
 	for i, col := range table.Columns {
 		name := quote(col.Name)
@@ -90,41 +119,25 @@ func snapshotRows(ctx context.Context, q querier, table Table, b *batch) (count 
 			fields[i] = name
 		}
 	}
-	rows, err := q.QueryContext(ctx, "SELECT "+strings.Join(fields, ",")+" FROM "+table.sqlName())
-	if err != nil {
-		return 0, dbError(err)
-	}
-	defer func() { result = errors.Join(result, dbError(rows.Close())) }()
-	for rows.Next() {
-		values := make([][]byte, len(table.Columns))
-		args := make([]any, len(values))
-		for i := range values {
-			args[i] = &values[i]
-		}
-		if err := rows.Scan(args...); err != nil {
-			return count, dbError(err)
-		}
-		columns := make([]event.Column, len(table.Columns))
-		for i, col := range table.Columns {
-			isBinary := col.BaseType == "binary" || col.BaseType == "varbinary" || col.BaseType == "image" || col.BaseType == "timestamp" || col.BaseType == "float" || col.BaseType == "real"
-			value, err := normalize(col, values[i], values[i] == nil, isBinary)
-			if err != nil {
-				return count, err
-			}
-			columns[i] = event.Column{Name: col.Name, Type: col.Type, Value: value}
-		}
-		rowKey, err := key(table, columns)
+	return fields
+}
+
+func snapshotRow(table Table, values [][]byte) (event.Row, error) {
+	columns := make([]event.Column, len(table.Columns))
+	for i, col := range table.Columns {
+		isBinary := col.BaseType == "binary" || col.BaseType == "varbinary" || col.BaseType == "image" || col.BaseType == "timestamp" || col.BaseType == "float" || col.BaseType == "real"
+		value, err := normalize(col, values[i], values[i] == nil, isBinary)
 		if err != nil {
-			return count, err
+			return event.Row{}, err
 		}
-		if err := b.add(ctx, event.Row{Schema: table.Schema, Table: table.Name, Identity: table.RowIdentity,
-			Operation: "read", Key: rowKey, Columns: columns}); err != nil {
-			return count, err
-		}
-		count++
-		b.metrics.SQLSnapshotScanned()
+		columns[i] = event.Column{Name: col.Name, Type: col.Type, Value: value}
 	}
-	return count, dbError(rows.Err())
+	rowKey, err := key(table, columns)
+	if err != nil {
+		return event.Row{}, err
+	}
+	return event.Row{Schema: table.Schema, Table: table.Name, Identity: table.RowIdentity,
+		Operation: "read", Key: rowKey, Columns: columns}, nil
 }
 
 type eventHeader struct {

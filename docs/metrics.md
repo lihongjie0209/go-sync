@@ -68,6 +68,9 @@
 | `sqlserver_legacy_polls_total{result}` / `sqlserver_legacy_poll_duration_seconds` | Counter / Histogram | SQL Server 2000 Outbox 轮询结果与耗时 |
 | `capture_recovery_discarded_messages_total` | Counter | 故障恢复成功清理的、从未发布的暂存消息数 |
 | `metrics_requests_total{code}` / `metrics_request_duration_seconds` | Counter / Histogram | 监控接口自身的返回码/耗时；当前请求结束后才计入 |
+| `server_reconciliations_total{syncer_id,result}` | Counter | 服务端定时对账结果：`match`、`mismatch`、`repair` 或 `error` |
+| `server_reconciliation_duration_seconds{syncer_id}` | Histogram | 一次完整源端/目标端哈希对账耗时 |
+| `server_reconciliation_mismatched_buckets{syncer_id}` | Gauge | 最近一次对账发现的差异桶数 |
 
 此外注册官方 `go_*` 和 `process_*` collector；进程指标可用性受操作系统影响。
 

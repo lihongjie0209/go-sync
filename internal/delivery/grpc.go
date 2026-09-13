@@ -21,10 +21,19 @@ import (
 )
 
 type GRPCSender struct {
-	cfg     config.Config
-	log     *slog.Logger
-	metrics *telemetry.Metrics
+	cfg       config.Config
+	log       *slog.Logger
+	metrics   *telemetry.Metrics
+	reconcile ReconcileController
 }
+
+type ReconcileController interface {
+	Reconcile(context.Context, *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error)
+	Resume(context.Context, string) error
+	Repair(context.Context, string) error
+}
+
+var ErrRepairRestart = errors.New("reconciliation repair requested a new snapshot")
 
 func NewGRPC(c config.Config, log *slog.Logger) *GRPCSender {
 	return &GRPCSender{cfg: c, log: log}
@@ -32,6 +41,11 @@ func NewGRPC(c config.Config, log *slog.Logger) *GRPCSender {
 
 func (s *GRPCSender) WithMetrics(metrics *telemetry.Metrics) *GRPCSender {
 	s.metrics = metrics
+	return s
+}
+
+func (s *GRPCSender) WithReconcile(controller ReconcileController) *GRPCSender {
+	s.reconcile = controller
 	return s
 }
 
@@ -57,6 +71,16 @@ func (s *GRPCSender) Run(ctx context.Context, q *queue.Store) error {
 }
 
 func (s *GRPCSender) connect(ctx context.Context, q *queue.Store) error {
+	var activeReconcile string
+	defer func() {
+		if activeReconcile != "" && s.reconcile != nil {
+			resumeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.reconcile.Resume(resumeCtx, activeReconcile); err != nil {
+				s.log.Warn("failed to resume capture after interrupted reconciliation", "error", err)
+			}
+		}
+	}()
 	certificate, err := os.ReadFile(s.cfg.GRPC.TLS.CAFile)
 	if err != nil {
 		return fmt.Errorf("read grpc CA: %w", err)
@@ -81,8 +105,11 @@ func (s *GRPCSender) connect(ctx context.Context, q *queue.Store) error {
 	if err != nil {
 		return err
 	}
+	if generation == "" {
+		return errors.New("capture generation is not ready")
+	}
 	if err := stream.Send(&syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_Hello{Hello: &syncv1.Hello{
-		SyncerId: s.cfg.SourceID, Generation: generation, EarliestSeq: earliest, ReadySeq: ready, ProtocolVersion: "v2",
+		SyncerId: s.cfg.SourceID, Generation: generation, EarliestSeq: earliest, ReadySeq: ready, ProtocolVersion: "v2", ReconcileSupported: s.reconcile != nil,
 	}}}); err != nil {
 		return err
 	}
@@ -105,6 +132,59 @@ func (s *GRPCSender) connect(ctx context.Context, q *queue.Store) error {
 		frame, err := stream.Recv()
 		if err != nil {
 			return err
+		}
+		if request := frame.GetReconcile(); request != nil {
+			activeReconcile = request.RequestId
+			result := &syncv1.ReconcileResult{RequestId: request.RequestId, SourceSchema: request.SourceSchema, Table: request.Table}
+			if s.reconcile == nil {
+				result.Error = "collector does not support reconciliation"
+			} else {
+				reconcileCtx := ctx
+				cancel := func() {}
+				if request.TimeoutSeconds > 0 {
+					reconcileCtx, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutSeconds)*time.Second)
+				}
+				computed, reconcileErr := s.reconcile.Reconcile(reconcileCtx, request)
+				cancel()
+				if reconcileErr != nil {
+					s.log.WarnContext(ctx, "source reconciliation failed", "error", reconcileErr)
+					result.Error = "source reconciliation failed"
+				} else if computed == nil || computed.RequestId != request.RequestId {
+					result.Error = "collector returned an invalid reconciliation result"
+				} else {
+					result = computed
+				}
+			}
+			if err := stream.Send(&syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_ReconcileResult{ReconcileResult: result}}); err != nil {
+				return err
+			}
+			continue
+		}
+		if request := frame.GetResume(); request != nil {
+			if s.reconcile == nil {
+				return errors.New("grpc server requested reconciliation resume from an unsupported collector")
+			}
+			if err := s.reconcile.Resume(ctx, request.RequestId); err != nil {
+				return err
+			}
+			activeReconcile = ""
+			if err := stream.Send(&syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_ResumeAccepted{ResumeAccepted: &syncv1.ResumeAccepted{RequestId: request.RequestId}}}); err != nil {
+				return err
+			}
+			continue
+		}
+		if request := frame.GetRepair(); request != nil {
+			if s.reconcile == nil {
+				return errors.New("grpc server requested repair from an unsupported collector")
+			}
+			if err := s.reconcile.Repair(ctx, request.RequestId); err != nil {
+				return err
+			}
+			activeReconcile = ""
+			if err := stream.Send(&syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_RepairAccepted{RepairAccepted: &syncv1.RepairAccepted{RequestId: request.RequestId}}}); err != nil {
+				return err
+			}
+			return ErrRepairRestart
 		}
 		if ack := frame.GetAck(); ack != nil {
 			st, err := q.State()

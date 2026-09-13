@@ -15,6 +15,7 @@ import (
 	"go-sync/internal/filewatch"
 	mysqlsource "go-sync/internal/mysql"
 	"go-sync/internal/queue"
+	syncv1 "go-sync/internal/rpc/syncv1"
 	"go-sync/internal/sqlserver"
 	"go-sync/internal/sqlserverlegacy"
 	"go-sync/internal/telemetry"
@@ -77,21 +78,41 @@ func Run(ctx context.Context, c config.Config, log *slog.Logger) (result error) 
 	if metricsServer != nil {
 		g.Go(func() error { return metricsServer.Run(groupCtx) })
 	}
-	g.Go(func() error {
+	runCapture := func(captureCtx context.Context) error {
 		if c.Engine() == "files" {
-			return filewatch.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+			return filewatch.New(c, q, log).WithMetrics(metrics).Run(captureCtx)
 		} else if c.Engine() == "sqlserver" {
-			return sqlserver.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+			return sqlserver.New(c, q, log).WithMetrics(metrics).Run(captureCtx)
 		} else if c.Engine() == "sqlserver_legacy" {
-			return sqlserverlegacy.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+			return sqlserverlegacy.New(c, q, log).WithMetrics(metrics).Run(captureCtx)
 		} else if c.Engine() == "mysql" {
-			return mysqlsource.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
+			return mysqlsource.New(c, q, log).WithMetrics(metrics).Run(captureCtx)
 		}
-		return capture.New(c, q, log).WithMetrics(metrics).Run(groupCtx)
-	})
+		return capture.New(c, q, log).WithMetrics(metrics).Run(captureCtx)
+	}
+	var scanner reconcileScanner
+	if c.Engine() == "postgres" {
+		scanner = func(scanCtx context.Context, request *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error) {
+			return capture.Reconcile(scanCtx, c, request)
+		}
+	} else if c.Engine() == "mysql" {
+		scanner = func(scanCtx context.Context, request *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error) {
+			return mysqlsource.Reconcile(scanCtx, c, request)
+		}
+	} else if c.Engine() == "sqlserver" {
+		scanner = func(scanCtx context.Context, request *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error) {
+			return sqlserver.Reconcile(scanCtx, c, request)
+		}
+	} else if c.Engine() == "sqlserver_legacy" {
+		scanner = func(scanCtx context.Context, request *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error) {
+			return sqlserverlegacy.Reconcile(scanCtx, c, request)
+		}
+	}
+	controller := newCaptureController(groupCtx, q, runCapture, scanner)
+	g.Go(func() error { return controller.Wait(groupCtx) })
 	g.Go(func() error {
 		if c.DeliveryTransport() == "grpc" {
-			return delivery.NewGRPC(c, log).WithMetrics(metrics).Run(groupCtx, q)
+			return delivery.NewGRPC(c, log).WithMetrics(metrics).WithReconcile(controller).Run(groupCtx, q)
 		}
 		return delivery.New(c, log).WithMetrics(metrics).Run(groupCtx, q)
 	})

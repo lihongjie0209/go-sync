@@ -82,10 +82,35 @@ type Syncer struct {
 }
 
 type Reconcile struct {
-	DailyAt    string `json:"daily_at,omitempty"`
-	Timezone   string `json:"timezone,omitempty"`
-	Buckets    int    `json:"buckets,omitempty"`
-	AutoRepair bool   `json:"auto_repair"`
+	Enabled           bool   `json:"enabled"`
+	DailyAt           string `json:"daily_at,omitempty"`
+	Timezone          string `json:"timezone,omitempty"`
+	Buckets           int    `json:"buckets,omitempty"`
+	Timeout           string `json:"timeout,omitempty"`
+	RepairMinInterval string `json:"repair_min_interval,omitempty"`
+	AutoRepair        bool   `json:"auto_repair"`
+	DryRun            bool   `json:"dry_run"`
+}
+
+func (r Reconcile) validate() error {
+	if _, err := time.Parse("15:04", r.DailyAt); err != nil {
+		return errors.New("reconcile.daily_at must use HH:MM")
+	}
+	if _, err := time.LoadLocation(r.Timezone); err != nil {
+		return errors.New("reconcile.timezone is invalid")
+	}
+	if r.Buckets < 1 || r.Buckets > 65536 {
+		return errors.New("reconcile.buckets must be between 1 and 65536")
+	}
+	for name, value := range map[string]string{"timeout": r.Timeout, "repair_min_interval": r.RepairMinInterval} {
+		if duration, err := time.ParseDuration(value); err != nil || duration < time.Minute {
+			return fmt.Errorf("reconcile.%s must be at least 1m", name)
+		}
+	}
+	if r.DryRun && r.AutoRepair {
+		return errors.New("reconcile.dry_run and reconcile.auto_repair cannot both be true")
+	}
+	return nil
 }
 
 type Config struct {
@@ -103,8 +128,9 @@ func Defaults() Config {
 		GRPC:            GRPC{ListenAddr: ":7443", MaxMessageBytes: 32 << 20},
 		MetricsAddr:     "127.0.0.1:9100",
 		VictoriaMetrics: VictoriaMetrics{Interval: "30s", Timeout: "15s"},
-		Reconcile:       Reconcile{DailyAt: "02:00", Timezone: "Asia/Shanghai", Buckets: 256, AutoRepair: true},
-		Log:             config.Log{Level: "info", MaxSizeMB: 100, MaxBackups: 10, MaxAgeDays: 30, Compress: true},
+		Reconcile: Reconcile{Enabled: true, DailyAt: "02:00", Timezone: "Asia/Shanghai", Buckets: 256,
+			Timeout: "30m", RepairMinInterval: "24h", AutoRepair: true},
+		Log: config.Log{Level: "info", MaxSizeMB: 100, MaxBackups: 10, MaxAgeDays: 30, Compress: true},
 	}
 }
 
@@ -183,14 +209,8 @@ func (c Config) Validate() error {
 			return errors.New("VictoriaMetrics headers are invalid")
 		}
 	}
-	if _, err := time.Parse("15:04", c.Reconcile.DailyAt); err != nil {
-		return errors.New("reconcile.daily_at must use HH:MM")
-	}
-	if _, err := time.LoadLocation(c.Reconcile.Timezone); err != nil {
-		return errors.New("reconcile.timezone is invalid")
-	}
-	if c.Reconcile.Buckets < 1 || c.Reconcile.Buckets > 65536 {
-		return errors.New("reconcile.buckets must be between 1 and 65536")
+	if err := c.Reconcile.validate(); err != nil {
+		return err
 	}
 	seenIDs := make(map[string]struct{}, len(c.Syncers))
 	seenTargets := make(map[string]string)

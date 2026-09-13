@@ -15,6 +15,7 @@ import (
 	"go-sync/internal/config"
 	"go-sync/internal/event"
 	"go-sync/internal/queue"
+	syncv1 "go-sync/internal/rpc/syncv1"
 	"go-sync/internal/telemetry"
 	"go-sync/internal/testmysql"
 )
@@ -91,6 +92,17 @@ func testMySQL(t *testing.T, version string) {
 	info, err := Inspect(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	reconciled, err := Reconcile(ctx, cfg, &syncv1.ReconcileRequest{RequestId: "mysql-reconcile", SourceSchema: "go_sync_test", Table: "bag", Buckets: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reconciledRows uint64
+	for _, digest := range reconciled.Digests {
+		reconciledRows += digest.Rows
+	}
+	if reconciledRows != 2 || len(reconciled.PrimaryKeys) != 0 {
+		t.Fatalf("unexpected keyless reconcile result: rows=%d keys=%v", reconciledRows, reconciled.PrimaryKeys)
 	}
 	if err = collector.snapshot(ctx, info); err != nil {
 		t.Fatal(err)

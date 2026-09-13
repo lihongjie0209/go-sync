@@ -16,6 +16,7 @@ import (
 
 var ErrFull = errors.New("queue capacity reached")
 var ErrEmpty = errors.New("queue empty")
+var ErrNotDrained = errors.New("queue is not fully delivered")
 
 var metaBucket = []byte("meta")
 var itemsBucket = []byte("items")
@@ -332,6 +333,44 @@ func (s *Store) Recover() error {
 			}
 		}
 		st.NextSeq = st.ReadySeq
+		return save(tx, st)
+	})
+}
+
+// ResetForSnapshot atomically retires a fully acknowledged generation. Source
+// ownership fields are deliberately retained so the next capture attempt can
+// safely replace its own replication slot/outbox and create a new generation.
+// It must only be called while capture is stopped.
+func (s *Store) ResetForSnapshot() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		st, err := read(tx)
+		if err != nil {
+			return err
+		}
+		if st.Phase != "stream" {
+			return errors.New("only a sealed stream can be repaired")
+		}
+		if st.NextSeq != st.ReadySeq || st.DeliveredSeq != st.ReadySeq {
+			return ErrNotDrained
+		}
+		if err := tx.DeleteBucket(itemsBucket); err != nil {
+			return err
+		}
+		if _, err := tx.CreateBucket(itemsBucket); err != nil {
+			return err
+		}
+		st.Phase = "snapshot"
+		st.Generation = ""
+		st.SchemaHash = ""
+		st.SnapshotLSN = ""
+		st.DurableLSN = ""
+		st.SourceCleanup = ""
+		st.NextSeq = 0
+		st.ReadySeq = 0
+		st.DeliveredSeq = 0
+		st.Bytes = 0
+		st.EarliestSeq = 1
+		st.ArchiveBytes = 0
 		return save(tx, st)
 	})
 }

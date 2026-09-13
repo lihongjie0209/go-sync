@@ -20,6 +20,7 @@ import (
 	"go-sync/internal/delivery"
 	"go-sync/internal/event"
 	"go-sync/internal/queue"
+	syncv1 "go-sync/internal/rpc/syncv1"
 	"go-sync/internal/telemetry"
 	"go-sync/internal/testsqlserver"
 )
@@ -67,6 +68,17 @@ func runSQLServerSnapshotCDCRecovery(t *testing.T, start func(*testing.T) (strin
 	cfg.ReserveBytes, cfg.BatchRows = 0, 1
 	cfg.SQLServer.FenceTable = config.Table{Schema: "dbo", Name: "go_sync_fence"}
 	cfg.Tables = []config.Table{{Schema: "dbo", Name: "items"}, {Schema: "dbo", Name: "details"}, {Schema: "dbo", Name: "bag"}}
+	reconciled, err := Reconcile(ctx, cfg, &syncv1.ReconcileRequest{RequestId: "sqlserver-reconcile", SourceSchema: "dbo", Table: "bag", Buckets: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reconciledRows uint64
+	for _, digest := range reconciled.Digests {
+		reconciledRows += digest.Rows
+	}
+	if reconciledRows != 2 || len(reconciled.PrimaryKeys) != 0 {
+		t.Fatalf("unexpected keyless reconcile result: rows=%d keys=%v", reconciledRows, reconciled.PrimaryKeys)
+	}
 	q, err := queue.Open(cfg.DataDir, cfg.QueueBytes, 0)
 	if err != nil {
 		t.Fatal(err)

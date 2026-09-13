@@ -122,11 +122,40 @@ The server watches the configuration file and also exposes the authenticated
 `Admin.ReloadConfig` RPC. A candidate is fully parsed, its TLS key pair loaded,
 and every PostgreSQL target connected and validated before one atomic switch.
 Failure leaves the previous configuration active. Syncers, tokens, target
-connections, TLS certificates, VictoriaMetrics settings and log level are hot
-reloadable. Listener addresses, metrics address, log file and rotation settings
-require restart.
+connections, TLS certificates, VictoriaMetrics/reconciliation settings and log
+level are hot reloadable. Listener addresses, metrics address, log file and
+rotation settings require restart.
 
-The current gRPC release requests and replays retained sequence numbers. If the
-requested sequence predates the collector archive it fails closed and reports
-that a new snapshot is required; automated repair commands and scheduled hash
-reconciliation are reserved by the protocol but not yet enabled.
+The gRPC server also performs scheduled PostgreSQL reconciliation. After the
+collector queue is fully acknowledged, it pauses WAL capture and scans each
+configured source table in a repeatable-read transaction. Source and target
+rows are assigned to `reconcile.buckets` buckets and compared with an
+order-independent, duplicate-sensitive SHA-256 aggregate; memory usage is
+bounded by the bucket count rather than table size. Tables without primary keys
+use the complete row as identity, so duplicate counts remain significant.
+
+On mismatch, `auto_repair` requests a new complete snapshot generation. The
+old target remains usable until the existing atomic snapshot apply reaches
+`snapshot_end`; this avoids racing row patches with live WAL. Repairs are rate
+limited by `repair_min_interval`. Set `dry_run: true` together with
+`auto_repair: false` to detect and audit drift without changing the target.
+Writes that commit after capture is paused can conservatively appear as drift;
+the resulting repair is safe but potentially expensive, so schedule the scan
+for a low-write window and keep the repair rate limit enabled.
+
+Reconciliation assumes configured source columns remain represented in the
+target table. If a downstream process uploads a binary value to object storage
+and then clears that target column, set `auto_repair` to `false` (or disable
+reconciliation) until an object-metadata digest adapter is configured; otherwise
+the intentional `NULL` is correctly observed as a difference and repeatedly
+requests a full snapshot.
+Results are stored in `<metadata_schema>.reconcile_audit`. An interrupted hash
+run automatically resumes capture. Source-side scanning is available for
+PostgreSQL, MySQL 5.6/5.7, SQL Server CDC and SQL Server legacy collectors.
+SQL Server 2000 has no snapshot isolation, so its serializable table scan can
+briefly block writers; schedule it outside peak hours. Filesystem collectors do
+not advertise database reconciliation support.
+
+The server still requests and replays retained sequence numbers for ordinary
+fault recovery. If the requested sequence predates the collector archive it
+fails closed and reports that a new snapshot is required.

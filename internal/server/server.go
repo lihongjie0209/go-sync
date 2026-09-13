@@ -40,13 +40,14 @@ type Service struct {
 	logLevel *slog.LevelVar
 	metrics  *serverMetrics
 
-	mu          sync.RWMutex
-	cfg         serverconfig.Config
-	targets     map[string]*target
-	connected   map[string]bool
-	lastErrors  map[string]string
-	reloadError string
-	certificate atomic.Pointer[tls.Certificate]
+	mu            sync.RWMutex
+	cfg           serverconfig.Config
+	targets       map[string]*target
+	connected     map[string]bool
+	lastErrors    map[string]string
+	reconcileNext map[string]time.Time
+	reloadError   string
+	certificate   atomic.Pointer[tls.Certificate]
 }
 
 func (s *Service) WithLogLevel(level *slog.LevelVar) *Service {
@@ -211,11 +212,18 @@ func (s *Service) Connect(stream grpc.BidiStreamingServer[syncv1.CollectorFrame,
 	if err != nil {
 		return status.Error(codes.Unavailable, "target database unavailable")
 	}
-	if progress.Generation != "" && progress.Generation != hello.Generation {
-		return status.Error(codes.FailedPrecondition, "collector generation differs from target")
-	}
 	generation := hello.Generation
 	next := progress.Received + 1
+	if progress.Generation != "" && progress.Generation != hello.Generation {
+		allowed, consumeErr := target.consumeRepairAuthorization(stream.Context())
+		if consumeErr != nil {
+			return status.Error(codes.Unavailable, "repair authorization is unavailable")
+		}
+		if !allowed {
+			return status.Error(codes.FailedPrecondition, "collector generation differs from target without an authorized repair")
+		}
+		next = 1
+	}
 	s.metrics.connected.WithLabelValues(hello.SyncerId).Set(1)
 	s.metrics.received.WithLabelValues(hello.SyncerId).Set(float64(progress.Received))
 	s.metrics.applied.WithLabelValues(hello.SyncerId).Set(float64(progress.Applied))
@@ -244,6 +252,18 @@ func (s *Service) Connect(stream grpc.BidiStreamingServer[syncv1.CollectorFrame,
 		if frame.GetIdle() != nil {
 			if s.retiring(hello.SyncerId, target) && !openBatch {
 				return nil
+			}
+			if hello.ReconcileSupported && !openBatch && s.reconcileDue(hello.SyncerId, time.Now()) {
+				repaired, reconcileErr := s.runReconcile(stream, hello.SyncerId, target)
+				if reconcileErr != nil {
+					s.retryReconcile(hello.SyncerId, time.Now())
+					s.metrics.reconciles.WithLabelValues(hello.SyncerId, "error").Inc()
+					s.setSyncerError(hello.SyncerId, reconcileErr.Error())
+					return status.Error(codes.Unavailable, "reconciliation failed")
+				}
+				if repaired {
+					return nil
+				}
 			}
 			timer := time.NewTimer(time.Second)
 			select {
@@ -466,6 +486,9 @@ func (s *Service) reload(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.cfg, s.targets, s.reloadError = candidate, opened, ""
+	if !reflect.DeepEqual(current.Reconcile, candidate.Reconcile) {
+		s.reconcileNext = make(map[string]time.Time)
+	}
 	s.mu.Unlock()
 	s.certificate.Store(&certificate)
 	if s.logLevel != nil {

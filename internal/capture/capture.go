@@ -22,6 +22,8 @@ import (
 	"go-sync/internal/delivery"
 	"go-sync/internal/event"
 	"go-sync/internal/queue"
+	"go-sync/internal/reconcile"
+	syncv1 "go-sync/internal/rpc/syncv1"
 	"go-sync/internal/telemetry"
 	"go-sync/internal/walplugin"
 )
@@ -31,6 +33,90 @@ type Collector struct {
 	q       *queue.Store
 	log     *slog.Logger
 	metrics *telemetry.Metrics
+}
+
+// Reconcile reads one configured table in a repeatable-read transaction. The
+// caller must stop WAL capture first so the local delivery boundary is stable.
+func Reconcile(ctx context.Context, cfg config.Config, request *syncv1.ReconcileRequest) (*syncv1.ReconcileResult, error) {
+	allowed := false
+	for _, table := range cfg.Tables {
+		if table.Schema == request.SourceSchema && table.Name == request.Table {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, errors.New("reconciliation table is outside the configured capture scope")
+	}
+	conn, err := connect(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeConn(ctx, conn)
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tables, err := catalog(ctx, tx, []config.Table{{Schema: request.SourceSchema, Name: request.Table}})
+	if err != nil {
+		return nil, err
+	}
+	table := tables[0]
+	columns := make([]string, 0, len(table.Columns))
+	result := &syncv1.ReconcileResult{RequestId: request.RequestId, SourceSchema: table.Schema, Table: table.Name}
+	for _, column := range table.Columns {
+		columns = append(columns, pgx.Identifier{column.Name}.Sanitize())
+		result.Columns = append(result.Columns, column.Name)
+		result.ColumnTypes = append(result.ColumnTypes, column.Type)
+		if column.Primary {
+			result.PrimaryKeys = append(result.PrimaryKeys, column.Name)
+		}
+	}
+	rows, err := tx.Query(ctx, "SELECT "+strings.Join(columns, ",")+" FROM "+table.SQL())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	builder, err := reconcile.NewBuilder(request.Buckets)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		row := event.Row{Schema: table.Schema, Table: table.Name}
+		for index, raw := range rows.RawValues() {
+			column := table.Columns[index]
+			value := event.Column{Name: column.Name, Type: column.Type}
+			if raw != nil {
+				text := string(raw)
+				if column.OID == 16 {
+					text = map[bool]string{true: "true", false: "false"}[text == "t"]
+				}
+				value.Value = &text
+			}
+			row.Columns = append(row.Columns, value)
+			if column.Primary {
+				row.Key = append(row.Key, value)
+			}
+		}
+		if table.RowIdentity == "full_row" {
+			row.Identity = "full_row"
+			row.Key = append([]event.Column(nil), row.Columns...)
+		}
+		if err := builder.Add(row); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, digest := range builder.Digests() {
+		result.Digests = append(result.Digests, &syncv1.BucketDigest{Bucket: digest.Bucket, Rows: digest.Rows, Digest: digest.Hash})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 var errSchemaRefreshed = errors.New("schema refreshed; replay from durable checkpoint")

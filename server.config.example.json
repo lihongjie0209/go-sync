@@ -13,7 +13,7 @@
     "timeout": "15s",
     "headers": {}
   },
-  "reconcile": {"daily_at": "02:00", "timezone": "Asia/Shanghai", "buckets": 256, "auto_repair": true},
+  "reconcile": {"enabled": true, "daily_at": "02:00", "timezone": "Asia/Shanghai", "buckets": 256, "timeout": "30m", "repair_min_interval": "24h", "auto_repair": true, "dry_run": false},
   "log": {"file": "logs/go-sync-server.log", "level": "info", "max_size_mb": 100, "max_backups": 10, "max_age_days": 30, "compress": true},
   "syncers": [{
     "id": "pms-client-01",

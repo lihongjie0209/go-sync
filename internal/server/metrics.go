@@ -24,6 +24,9 @@ type serverMetrics struct {
 	connected, received, applied, pending  *prometheus.GaugeVec
 	events, applyErrors, reloads, vmWrites *prometheus.CounterVec
 	applyDuration                          *prometheus.HistogramVec
+	reconciles                             *prometheus.CounterVec
+	reconcileDuration                      *prometheus.HistogramVec
+	reconcileBuckets                       *prometheus.GaugeVec
 
 	mu        sync.RWMutex
 	collector map[string][]byte
@@ -41,7 +44,11 @@ func newServerMetrics() *serverMetrics {
 	m.reloads = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "go_sync_server", Name: "config_reloads_total", Help: "Configuration reload attempts."}, []string{"result"})
 	m.vmWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "go_sync_server", Name: "victoriametrics_writes_total", Help: "VictoriaMetrics import attempts."}, []string{"component", "result"})
 	m.applyDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "go_sync_server", Name: "apply_duration_seconds", Help: "Event persistence and apply duration.", Buckets: prometheus.DefBuckets}, []string{"syncer_id", "kind"})
+	m.reconciles = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "go_sync_server", Name: "reconciliations_total", Help: "Scheduled reconciliation outcomes."}, []string{"syncer_id", "result"})
+	m.reconcileDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "go_sync_server", Name: "reconciliation_duration_seconds", Help: "Scheduled reconciliation duration.", Buckets: prometheus.DefBuckets}, []string{"syncer_id"})
+	m.reconcileBuckets = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "go_sync_server", Name: "reconciliation_mismatched_buckets", Help: "Mismatched buckets in the latest reconciliation."}, []string{"syncer_id"})
 	registry.MustRegister(m.connected, m.received, m.applied, m.pending, m.events, m.applyErrors, m.reloads, m.vmWrites, m.applyDuration,
+		m.reconciles, m.reconcileDuration, m.reconcileBuckets,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	m.handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{EnableOpenMetrics: true, MaxRequestsInFlight: 4})
 	return m

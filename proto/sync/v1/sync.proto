@@ -20,6 +20,9 @@ message CollectorFrame {
     ReplayUnavailable replay_unavailable = 3;
     Metrics metrics = 4;
     Idle idle = 5;
+    ReconcileResult reconcile_result = 6;
+    RepairAccepted repair_accepted = 7;
+    ResumeAccepted resume_accepted = 8;
   }
 }
 
@@ -27,6 +30,9 @@ message ServerFrame {
   oneof body {
     Pull pull = 1;
     Ack ack = 2;
+    ReconcileRequest reconcile = 3;
+    RepairRequest repair = 4;
+    ResumeRequest resume = 5;
   }
 }
 
@@ -36,6 +42,7 @@ message Hello {
   uint64 earliest_seq = 3;
   uint64 ready_seq = 4;
   string protocol_version = 5;
+  bool reconcile_supported = 6;
 }
 
 message Event {
@@ -62,6 +69,52 @@ message Ack {
   string generation = 1;
   uint64 seq = 2;
   string message_id = 3;
+}
+
+message ReconcileRequest {
+  string request_id = 1;
+  string source_schema = 2;
+  string table = 3;
+  uint32 buckets = 4;
+  bool all_buckets = 5;
+  uint32 bucket = 6;
+  bool include_rows = 7;
+  uint32 timeout_seconds = 8;
+}
+
+message BucketDigest {
+  uint32 bucket = 1;
+  uint64 rows = 2;
+  string digest = 3;
+}
+
+message ReconcileResult {
+  string request_id = 1;
+  string source_schema = 2;
+  string table = 3;
+  repeated string columns = 4;
+  repeated string primary_keys = 5;
+  repeated BucketDigest digests = 6;
+  bytes rows_json = 7;
+  string error = 8;
+  repeated string column_types = 9;
+}
+
+message RepairRequest {
+  string request_id = 1;
+  string reason = 2;
+}
+
+message RepairAccepted {
+  string request_id = 1;
+}
+
+message ResumeRequest {
+  string request_id = 1;
+}
+
+message ResumeAccepted {
+  string request_id = 1;
 }
 
 // Metrics contains one Prometheus text exposition snapshot. The server adds

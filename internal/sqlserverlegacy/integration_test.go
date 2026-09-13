@@ -30,7 +30,7 @@ func TestLegacyOutboxInstallationAndRollback(t *testing.T) {
 	cfg.SourceType, cfg.SourceID, cfg.DSN = "sqlserver_legacy", "legacy-test", dsn
 	cfg.URL = "http://127.0.0.1/unused"
 	cfg.Tables = []config.Table{{Schema: "dbo", Name: "legacy_items"}}
-	table, err := readTable(ctx, db, cfg, cfg.Tables[0])
+	table, err := readTable(ctx, db, cfg, cfg.Tables[0], true)
 	if err != nil {
 		var databaseErr *databaseError
 		if errors.As(err, &databaseErr) {

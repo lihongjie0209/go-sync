@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -21,8 +23,40 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go-sync/internal/event"
+	"go-sync/internal/reconcile"
+	syncv1 "go-sync/internal/rpc/syncv1"
 	"go-sync/internal/serverconfig"
+	"google.golang.org/grpc/metadata"
 )
+
+type reconcileTestStream struct {
+	ctx    context.Context
+	last   *syncv1.ServerFrame
+	result *syncv1.ReconcileResult
+}
+
+func (s *reconcileTestStream) Context() context.Context { return s.ctx }
+
+func (s *reconcileTestStream) Send(frame *syncv1.ServerFrame) error { s.last = frame; return nil }
+func (s *reconcileTestStream) Recv() (*syncv1.CollectorFrame, error) {
+	if request := s.last.GetReconcile(); request != nil {
+		result := *s.result
+		result.RequestId = request.RequestId
+		return &syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_ReconcileResult{ReconcileResult: &result}}, nil
+	}
+	if request := s.last.GetRepair(); request != nil {
+		return &syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_RepairAccepted{RepairAccepted: &syncv1.RepairAccepted{RequestId: request.RequestId}}}, nil
+	}
+	if request := s.last.GetResume(); request != nil {
+		return &syncv1.CollectorFrame{Body: &syncv1.CollectorFrame_ResumeAccepted{ResumeAccepted: &syncv1.ResumeAccepted{RequestId: request.RequestId}}}, nil
+	}
+	return nil, errors.New("unexpected server frame")
+}
+func (s *reconcileTestStream) SetHeader(metadata.MD) error  { return nil }
+func (s *reconcileTestStream) SendHeader(metadata.MD) error { return nil }
+func (s *reconcileTestStream) SetTrailer(metadata.MD)       {}
+func (s *reconcileTestStream) SendMsg(any) error            { return nil }
+func (s *reconcileTestStream) RecvMsg(any) error            { return nil }
 
 func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
@@ -67,6 +101,18 @@ func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer target.Close()
+	if allowed, err := target.consumeRepairAuthorization(ctx); err != nil || allowed {
+		t.Fatalf("unexpected initial repair authorization: %v %v", allowed, err)
+	}
+	if err := target.authorizeRepair(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := target.consumeRepairAuthorization(ctx); err != nil || !allowed {
+		t.Fatalf("repair authorization was not persisted: %v %v", allowed, err)
+	}
+	if allowed, err := target.consumeRepairAuthorization(ctx); err != nil || allowed {
+		t.Fatalf("repair authorization was not one-shot: %v %v", allowed, err)
+	}
 	path, encoded, body := "a.txt", base64.StdEncoding.EncodeToString([]byte("file body")), "first"
 	messages := []event.Message{
 		{Kind: "snapshot_begin", Tables: []event.TableRef{{Schema: "src", Name: "documents"}, {Schema: "src", Name: "bag"}}},
@@ -92,6 +138,59 @@ func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 	var count int
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM bag").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("keyless snapshot: %d %v", count, err)
+	}
+	reconcileSchema := &syncv1.ReconcileResult{SourceSchema: "src", Table: "bag", Columns: []string{"n", "body"}, ColumnTypes: []string{"integer", "text"}}
+	sourceBuilder, err := reconcile.NewBuilder(16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := sourceBuilder.Add(event.Row{Schema: "src", Table: "bag", Identity: "full_row", Columns: []event.Column{{Name: "n", Value: ptr("1")}, {Name: "body", Value: ptr("same")}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targetDigests, err := target.reconcileDigests(ctx, reconcileSchema, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDigests := make([]*syncv1.BucketDigest, 0, 16)
+	for _, digest := range sourceBuilder.Digests() {
+		sourceDigests = append(sourceDigests, &syncv1.BucketDigest{Bucket: digest.Bucket, Rows: digest.Rows, Digest: digest.Hash})
+	}
+	if equal, mismatches := sameDigests(sourceDigests, targetDigests); !equal || mismatches != 0 {
+		t.Fatalf("keyless reconciliation mismatch: %d", mismatches)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE bag SET body='drift' WHERE ctid=(SELECT min(ctid) FROM bag)"); err != nil {
+		t.Fatal(err)
+	}
+	targetDigests, err = target.reconcileDigests(ctx, reconcileSchema, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if equal, mismatches := sameDigests(sourceDigests, targetDigests); equal || mismatches == 0 {
+		t.Fatal("target drift was not detected")
+	}
+	reconcileSchema.Digests = sourceDigests
+	reconcileTarget := *target
+	reconcileTarget.cfg.Tables = []serverconfig.Table{{SourceSchema: "src", Name: "bag"}}
+	service := &Service{
+		cfg:     serverconfig.Config{Reconcile: serverconfig.Reconcile{Buckets: 16, Timeout: "1m", RepairMinInterval: "1m", AutoRepair: true}},
+		metrics: newServerMetrics(), log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	repaired, err := service.runReconcile(&reconcileTestStream{ctx: ctx, result: reconcileSchema}, cfg.ID, &reconcileTarget)
+	if err != nil || !repaired {
+		t.Fatalf("automatic repair was not requested: repaired=%v err=%v", repaired, err)
+	}
+	var authorized bool
+	if err := conn.QueryRow(ctx, "SELECT repair_authorized FROM go_sync_meta.sync_state WHERE syncer_id=$1", cfg.ID).Scan(&authorized); err != nil || !authorized {
+		t.Fatalf("repair authorization was not durable: %v %v", authorized, err)
+	}
+	var audits int
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM go_sync_meta.reconcile_audit WHERE syncer_id=$1 AND result='repair'", cfg.ID).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("repair audit missing: %d %v", audits, err)
+	}
+	if _, err := conn.Exec(ctx, "UPDATE bag SET body='same'"); err != nil {
+		t.Fatal(err)
 	}
 	transaction := "tx-1"
 	row := event.Row{Schema: "src", Table: "bag", Identity: "full_row", Operation: "delete", Key: []event.Column{{Name: "n", Value: ptr("1")}, {Name: "body", Value: ptr("same")}}}
@@ -269,6 +368,28 @@ func TestTargetSnapshotTransactionKeylessAndFile(t *testing.T) {
 	var requiredExists bool
 	if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='documents' AND column_name='required_new')`).Scan(&requiredExists); err != nil || requiredExists {
 		t.Fatalf("unsafe schema change was not rolled back: %v %v", requiredExists, err)
+	}
+
+	allowed, err := target.consumeRepairAuthorization(ctx)
+	if err != nil || !allowed {
+		t.Fatalf("authorized repair generation was rejected: %v %v", allowed, err)
+	}
+	repairRows := event.Message{Kind: "snapshot_rows", Rows: []event.Row{
+		{Schema: "src", Table: "bag", Identity: "full_row", Operation: "read", Columns: []event.Column{{Name: "n", Value: ptr("1")}, {Name: "body", Value: ptr("same")}}},
+		{Schema: "src", Table: "bag", Identity: "full_row", Operation: "read", Columns: []event.Column{{Name: "n", Value: ptr("1")}, {Name: "body", Value: ptr("same")}}},
+	}}
+	repairMessages := []event.Message{
+		{Kind: "snapshot_begin", Tables: []event.TableRef{{Schema: "src", Name: "documents"}, {Schema: "src", Name: "bag"}}},
+		{Kind: "schema", Schema: json.RawMessage(`{"schema":"src","name":"documents"}`)},
+		{Kind: "schema", Schema: json.RawMessage(`{"schema":"src","name":"bag"}`)},
+		repairRows,
+		{Kind: "snapshot_end"},
+	}
+	for index := range repairMessages {
+		storeMessage(t, ctx, target, &repairMessages[index], uint64(index+1), "repair-generation")
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM bag WHERE n=1 AND body='same'").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("repair snapshot did not replace target contents: %d %v", count, err)
 	}
 
 	other, err := openTarget(ctx, cfg)

@@ -153,6 +153,7 @@ func (t *target) migrate(ctx context.Context) error {
 		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS open_transaction text NOT NULL DEFAULT ''",
 		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS schema_version text NOT NULL DEFAULT ''",
 		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS pending_schema_version text NOT NULL DEFAULT ''",
+		"ALTER TABLE " + meta + ".sync_state ADD COLUMN IF NOT EXISTS repair_authorized boolean NOT NULL DEFAULT false",
 		"CREATE TABLE IF NOT EXISTS " + meta + `.server_instance (
             singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), instance_id text NOT NULL)`,
 		"CREATE TABLE IF NOT EXISTS " + meta + `.inbox (
@@ -175,6 +176,11 @@ func (t *target) migrate(ctx context.Context) error {
             syncer_id text NOT NULL, generation text NOT NULL, schema_version text NOT NULL,
             source_schema text NOT NULL, table_name text NOT NULL, payload bytea NOT NULL,
             PRIMARY KEY(syncer_id, generation, schema_version, source_schema, table_name))`,
+		"CREATE TABLE IF NOT EXISTS " + meta + `.reconcile_audit (
+            id bigserial PRIMARY KEY, syncer_id text NOT NULL, request_id text NOT NULL,
+            started_at timestamptz NOT NULL, finished_at timestamptz NOT NULL,
+            result text NOT NULL, mismatched_buckets integer NOT NULL DEFAULT 0,
+            detail text NOT NULL DEFAULT '')`,
 	}
 	for _, statement := range statements {
 		if _, err := t.pool.Exec(ctx, statement); err != nil {
@@ -199,6 +205,29 @@ func (t *target) Progress(ctx context.Context) (progress, error) {
 	err := t.pool.QueryRow(ctx, "SELECT generation, received_seq, applied_seq, schema_version FROM "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state WHERE syncer_id=$1", t.cfg.ID).
 		Scan(&p.Generation, &p.Received, &p.Applied, &p.SchemaVersion)
 	return p, err
+}
+
+func (t *target) authorizeRepair(ctx context.Context) error {
+	_, err := t.pool.Exec(ctx, "UPDATE "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state SET repair_authorized=true WHERE syncer_id=$1", t.cfg.ID)
+	return err
+}
+
+func (t *target) consumeRepairAuthorization(ctx context.Context) (bool, error) {
+	tx, err := t.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var allowed bool
+	if err := tx.QueryRow(ctx, "SELECT repair_authorized FROM "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state WHERE syncer_id=$1 FOR UPDATE", t.cfg.ID).Scan(&allowed); err != nil {
+		return false, err
+	}
+	if allowed {
+		if _, err := tx.Exec(ctx, "UPDATE "+quote(t.cfg.Postgres.MetadataSchema)+".sync_state SET repair_authorized=false WHERE syncer_id=$1", t.cfg.ID); err != nil {
+			return false, err
+		}
+	}
+	return allowed, tx.Commit(ctx)
 }
 
 func (t *target) Store(ctx context.Context, message event.Message, raw []byte) error {
