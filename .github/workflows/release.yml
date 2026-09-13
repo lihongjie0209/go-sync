@@ -46,7 +46,7 @@ jobs:
       contents: read
     steps:
       - name: Upload GitHub Release assets to cf-file
-        uses: lihongjie0209/cf-file-upload-action@2464be15bfa6f18a3204e9296dc0c4b6e354beaf # v1
+        uses: lihongjie0209/cf-file-upload-action@74e1ace4a3156dbaf99591f7dd854434f66e637b # v1.1.1
         with:
           password: ${{ secrets.CF_FILE_PASSWORD }}
           github-token: ${{ github.token }}
